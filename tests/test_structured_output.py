@@ -18,6 +18,7 @@ import app.llm.glm as glm_module
 import main as main_module
 from app.config import load_env_file as _load_env_for_smoke
 from app.llm.structured import (
+    DEFAULT_EXTRACTION_TEMPERATURE,
     StructuredOutputError,
     chat_structured,
     extract_search_intent,
@@ -351,6 +352,53 @@ def test_cli_structured_failure_path(monkeypatch, capsys, tmp_path):
     assert exit_code == main_module.EXIT_TOOL_FAILED
     assert "[structured error]" in capsys.readouterr().err
     assert not (tmp_path / "x.json").exists()
+
+
+def _patch_temperature_recording_client(monkeypatch, seen: dict):
+    class FakeGLMClient:
+        def __init__(self, model=None):
+            pass
+
+        def chat(self, messages, *, model=None, temperature=None, json_mode=False):
+            seen["temperature"] = temperature
+            return LLMResponse(
+                content=GOOD_INTENT_JSON,
+                model="glm-test",
+                finish_reason="stop",
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+            )
+
+    monkeypatch.setattr("app.llm.glm.GLMClient", FakeGLMClient)
+
+
+def test_cli_structured_default_temperature_is_extraction_default(
+    monkeypatch, capsys, tmp_path
+):
+    """Regression: omitting --temperature must reach the LLM call as
+    DEFAULT_EXTRACTION_TEMPERATURE (0.1), not None overriding it."""
+    seen: dict = {}
+    _patch_temperature_recording_client(monkeypatch, seen)
+    exit_code = main_module.main(
+        ["structured", "--prompt", "study TP53", "--output", str(tmp_path / "a.json")]
+    )
+    assert exit_code == 0
+    assert seen["temperature"] == DEFAULT_EXTRACTION_TEMPERATURE
+    assert DEFAULT_EXTRACTION_TEMPERATURE == 0.1  # the documented default
+
+
+def test_cli_structured_explicit_temperature_overrides_default(
+    monkeypatch, capsys, tmp_path
+):
+    seen: dict = {}
+    _patch_temperature_recording_client(monkeypatch, seen)
+    exit_code = main_module.main(
+        ["structured", "--prompt", "study TP53", "--temperature", "0.3",
+         "--output", str(tmp_path / "b.json")]
+    )
+    assert exit_code == 0
+    assert seen["temperature"] == 0.3
 
 
 def test_cli_structured_empty_topics_rendered(monkeypatch, capsys, tmp_path):

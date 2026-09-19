@@ -1,5 +1,23 @@
 # Development Log
 
+## Phase 3 consistency patch (2026-09-19, pre-Phase 4)
+
+- `main.py`: `structured --temperature` argparse default changed from
+  `None` to `DEFAULT_EXTRACTION_TEMPERATURE` (imported from
+  `app/llm/structured.py` — no zhipuai in its import chain). Previously an
+  omitted flag sent `None`, silently overriding the service's 0.1 default
+  while the help text claimed 0.1. The constant is now the single source
+  of truth; `%(default)s` renders the real value in help.
+- `tests/test_structured_output.py`: two CLI-level regression tests —
+  omitted `--temperature` reaches the LLM call as
+  `DEFAULT_EXTRACTION_TEMPERATURE`; explicit `--temperature 0.3` passes
+  0.3.
+- Offline suite after the patch: 149 passed, 3 deselected.
+- Docs updated: `docs/phase-03-structured-output.md` (post-phase patch
+  section).
+
+---
+
 ## Phase 3 — Structured Output (2026-09-19)
 
 ### Phase 2 cleanups done first (per plan §0)

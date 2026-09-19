@@ -29,6 +29,7 @@ import json
 import sys
 from pathlib import Path
 
+from app.llm.structured import DEFAULT_EXTRACTION_TEMPERATURE  # no zhipuai import chain
 from app.models.schemas import Article
 from app.parsers.gene_file_parser import GeneFileError, GeneParseResult, parse_gene_file
 from app.tools.pubmed import PubMedError, search_pubmed
@@ -150,8 +151,9 @@ def build_parser() -> argparse.ArgumentParser:
     structured_parser.add_argument(
         "--temperature",
         type=float,
-        default=None,
-        help="Sampling temperature in [0, 1] (default: 0.1, the extraction default)",
+        default=DEFAULT_EXTRACTION_TEMPERATURE,  # single source of truth
+        help="Sampling temperature in [0, 1] (default: %(default)s, the "
+        "extraction default)",
     )
     structured_parser.add_argument(
         "--output",

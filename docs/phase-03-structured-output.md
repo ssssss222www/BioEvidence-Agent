@@ -210,6 +210,33 @@ Usage: prompt tokens=366 | completion tokens=34 | total tokens=400
 `outputs/search_intent.json` (validated data + model + usage only; no raw
 text, no hidden reasoning).
 
+## Post-phase consistency patch (2026-09-19, pre-Phase 4)
+
+### Problem — CLI default silently overrode the extraction temperature
+
+```text
+problem   omitting `structured --temperature` sent temperature=None to
+          extract_search_intent(), overriding the service's
+          DEFAULT_EXTRACTION_TEMPERATURE (0.1) — while the CLI help text
+          claimed the default was 0.1
+cause     argparse default was None and run_structured forwarded
+          args.temperature unconditionally, so the service-level default
+          was never used through the CLI
+fix       the CLI parser's default now references
+          DEFAULT_EXTRACTION_TEMPERATURE directly (single source of truth,
+          imported from app/llm/structured.py — its import chain does not
+          include zhipuai, so other subcommands are unaffected);
+          %(default)s in the help text now always shows the real value
+reason    two defaults for the same knob inevitably drift; the constant is
+          the one place that defines it
+result    no flag -> 0.1 reaches the LLM call; --temperature 0.3 -> 0.3;
+          covered by two CLI-level regression tests
+          (test_cli_structured_default_temperature_is_extraction_default,
+          test_cli_structured_explicit_temperature_overrides_default)
+```
+
+Test result after the patch: **149 passed, 3 deselected** (offline).
+
 ## Problems encountered
 
 ### Problem 1 — offline sdk-fixture NameError
