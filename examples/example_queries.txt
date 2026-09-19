@@ -1,0 +1,11 @@
+# Example PubMed queries for trying out Phase 0.
+# Run one with:
+#   python main.py --query "<query>" --max-results 5
+
+TP53 AND breast cancer
+BRCA1 AND ovarian cancer
+KRAS AND colorectal cancer
+EGFR AND lung adenocarcinoma AND immunotherapy
+PTEN AND prostate cancer
+tumor suppressor genes AND pan-cancer
+CRISPR screen AND DNA damage repair

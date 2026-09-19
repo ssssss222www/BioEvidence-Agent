@@ -1,0 +1,10 @@
+GeneSymbol,log2FoldChange,P.Value,FDR
+TP53,2.1,0.0005,0.001
+BRCA1,-1.8,0.002,0.012
+ EGFR ,3.4,0.0001,0.0004
+EGFR,2.9,0.01,0.03
+Trp53,1.2,0.05,
+MYC,,0.2,0.25
+,0.5,0.3,0.4
+KRAS,not_available,0.4,0.45
+PTEN,4.0,1.2,0.5
