@@ -1,9 +1,11 @@
 # Architecture
 
-## Overview (Phase 3)
+## Overview (Phase 4)
 
-The project contains four **independent** capabilities that are deliberately
-not connected yet:
+Phases 0-3 built four independent capabilities. Phase 4 adds the first
+real composition — the **agent loop** joins the GLM client (Phase 2) with
+the PubMed tool (Phase 0). Gene-file parsing and structured extraction
+remain standalone.
 
 Component 1 (Phase 0) — PubMed retrieval:
 
@@ -81,24 +83,52 @@ StructuredLLMResult             validated SearchIntent + raw LLMResponse
 JSON saved by main.py           (outputs/search_intent.json)
 ```
 
-The data contracts `Article`, `GeneRecord`, `LLMResponse` and
-`SearchIntent` are the currencies that later phases (LLM planning, evidence
-ranking, HTML report) will join together — but not before Phase 4.
+Component 5 (Phase 4) — the bounded literature-agent loop (first composition):
+
+```text
+main.py (agent)
+   ↓
+run_literature_agent()          (app/agent/loop.py, MAX_AGENT_STEPS=4)
+   ↓ messages + [PUBMED_TOOL_DEFINITION]
+GLMClient.chat(tools=…, tool_choice="auto")
+   ↓ tool_calls: list[ToolCall]          (raw JSON arguments preserved)
+execute_tool_call()             (app/agent/tools.py)
+   ↓ json.loads → PubMedSearchArgs (Pydantic) → allowlist registry
+search_pubmed()                 (app/tools/pubmed.py, reused unchanged)
+   ↓ Article[]
+bounded JSON projection         (≤5 articles, abstracts ≤1500 chars, marked)
+   ↓ role="tool" message (tool_call_id paired 1:1)
+GLMClient.chat(messages + tool result)   ← next loop step
+   ↓ final text answer
+AgentResult                     (answer, steps, tool_call_count, used_pmids, usage)
+```
+
+The data contracts `Article`, `GeneRecord`, `LLMResponse`, `SearchIntent`
+and `ToolCall` are the currencies that later phases (evidence ranking,
+citation verification, HTML report) will build on.
 
 ## Directory layout
 
 ```text
 literature_agent/               project root (repo root; see note below)
 ├── app/                        importable Python package
+│   ├── agent/
+│   │   ├── errors.py           AgentError / ToolExecutionError / AgentLoopError
+│   │   ├── loop.py             bounded agent loop + AgentResult (MAX_AGENT_STEPS=4)
+│   │   └── tools.py            PubMedSearchArgs, tool definition, allowlist
+│   │                           registry, execution + bounded serialization
 │   ├── config.py               shared .env loader (NCBI + GLM variables)
 │   ├── llm/
-│   │   ├── base.py             LLMClient protocol, error taxonomy, message validation
-│   │   ├── glm.py              GLMClient over the official ZhipuAI SDK (+ json_mode)
+│   │   ├── base.py             LLMClient protocol (+tools/tool_choice), error
+│   │   │                       taxonomy, message contract v2 (4 message shapes)
+│   │   ├── glm.py              GLMClient over the official ZhipuAI SDK
+│   │   │                       (+ json_mode, tool conversion both directions)
 │   │   └── structured.py       chat_structured / extract_search_intent (Phase 3)
 │   ├── models/
-│   │   ├── schemas.py          Article + GeneRecord + LLMResponse dataclasses
+│   │   ├── schemas.py          Article, GeneRecord, LLMResponse, ToolCall
 │   │   └── structured.py       SearchIntent Pydantic schema (LLM-validated data)
 │   ├── prompts/
+│   │   ├── literature_agent.py agent system prompt (Phase 4)
 │   │   └── search_intent.py    extraction-only system prompt (Phase 3)
 │   ├── parsers/
 │   │   └── gene_file_parser.py gene/DEG file parser (Phase 1)
@@ -113,10 +143,11 @@ literature_agent/               project root (repo root; see note below)
 │   ├── test_pubmed.py          Phase 0 tests + opt-in NCBI network smoke test
 │   ├── test_gene_file_parser.py Phase 1 offline tests (tmp_path fixtures)
 │   ├── test_glm_client.py      Phase 2 offline tests + opt-in GLM smoke test
-│   └── test_structured_output.py Phase 3 offline tests + opt-in extraction test
+│   ├── test_structured_output.py Phase 3 offline tests + opt-in extraction test
+│   └── test_agent_loop.py      Phase 4 offline tests + opt-in agent integration
 ├── main.py                     CLI entry point (orchestration only, subcommands)
 ├── .env.example                template for NCBI_* and GLM_* variables
-├── .gitignore                  ignores .env, outputs/*, caches, venvs
+├── .gitignore                  ignores .env, outputs/*, prompt/, caches, venvs
 ├── requirements.txt            requests + pandas + openpyxl + zhipuai + pydantic + pytest
 └── pyproject.toml              metadata + pytest config (markers, pythonpath)
 ```
@@ -130,25 +161,28 @@ extra nested folder.
 
 | Module | Responsibility | Depends on |
 |---|---|---|
-| `app/models/schemas.py` | Define `Article`, `GeneRecord`, `LLMResponse` and their missing-field contracts | nothing (stdlib only) |
+| `app/models/schemas.py` | Define `Article`, `GeneRecord`, `LLMResponse`, `ToolCall` and their field contracts | nothing (stdlib only) |
 | `app/models/structured.py` | `SearchIntent` — Pydantic schema for LLM-generated (untrusted) data | `pydantic` |
 | `app/config.py` | Optional stdlib `.env` loader shared by the PubMed tool and GLM client | nothing (stdlib only) |
-| `app/llm/base.py` | Provider-neutral `LLMClient` protocol (incl. `json_mode`), `LLMError` taxonomy, `validate_messages` | `schemas.py` |
-| `app/llm/glm.py` | `GLMClient`: SDK wiring, model/temperature/json_mode resolution, response normalization, secret redaction | `base.py`, `config.py`, `schemas.py`, `zhipuai` |
+| `app/llm/base.py` | Provider-neutral `LLMClient` protocol (`json_mode`, `tools`, `tool_choice`), `LLMError` taxonomy, message-contract v2 validation | `schemas.py` |
+| `app/llm/glm.py` | `GLMClient`: SDK wiring, model/temperature/json_mode resolution, neutral↔provider message & tool-call conversion, secret redaction | `base.py`, `config.py`, `schemas.py`, `zhipuai` |
 | `app/llm/structured.py` | `chat_structured` (JSON parse → Pydantic validate) and `extract_search_intent`; `StructuredOutputError` | `base.py`, `structured.py` (models), `prompts` |
-| `app/prompts/search_intent.py` | The extraction-only system prompt, as a versioned Python constant | nothing |
+| `app/prompts/*.py` | Versioned system prompts (extraction; literature agent) | nothing |
+| `app/agent/errors.py` | `AgentError` / `ToolExecutionError` / `AgentLoopError` | nothing |
+| `app/agent/tools.py` | `PubMedSearchArgs`, tool definition (schema from the model), allowlist `TOOL_REGISTRY`, execution + bounded serialization | `errors.py`, `schemas.py`, `pubmed.py`, `pydantic` |
+| `app/agent/loop.py` | `run_literature_agent` bounded loop + `AgentResult` | `errors.py`, `tools.py`, `base.py`, `prompts` |
 | `app/tools/pubmed.py` | Query validation, NCBI identity, HTTP with timeout/retry, ESearch/EFetch calls, XML→`Article` parsing | `schemas.py`, `config.py`, `requests` |
 | `app/parsers/gene_file_parser.py` | File-type dispatch, column alias mapping, gene cleaning, numeric validation, duplicate policy, parse statistics | `schemas.py`, `pandas`, `openpyxl` (via pandas) |
-| `main.py` | argparse subcommands (`pubmed`, `parse`, `llm`, `structured`), call the components, print summaries, save JSON, map errors to exit codes | the modules above |
-| `tests/` | Offline tests with fakes (SDK/HTTP monkeypatched, files in `tmp_path`) + opt-in network smoke tests | everything above |
+| `main.py` | argparse subcommands (`pubmed`, `parse`, `llm`, `structured`, `agent`), summaries, JSON persistence, error→exit-code mapping | the modules above |
+| `tests/` | Offline tests with fakes (SDK/HTTP/LLM monkeypatched, files in `tmp_path`) + opt-in network tests | everything above |
 
 Dependency direction is strictly
-`main.py → app.llm / app.tools.pubmed / app.parsers.gene_file_parser → app.models.*`.
-The models know nothing about I/O; the client/tool/parser modules know
-nothing about CLI/JSON files; `main.py` knows nothing about XML, pandas, or
-SDK response shapes. Upper layers depend on `app/llm/base.py` +
-`LLMResponse`/`SearchIntent`, never on `ZhipuAI` types — that is what
-makes a future `QwenClient`/`DeepSeekClient` a drop-in addition.
+`main.py → app.agent → app.llm / app.tools.pubmed / app.parsers.gene_file_parser → app.models.*`.
+The models know nothing about I/O; the provider adapter (`glm.py`) does
+protocol conversion only — it never imports agent code or business tools;
+the agent loop knows the tool registry but not any SDK type. `main.py`
+knows nothing about XML, pandas, or SDK shapes. This layering is what lets
+providers and tools evolve independently.
 
 ## Key design decisions
 
@@ -163,6 +197,21 @@ makes a future `QwenClient`/`DeepSeekClient` a drop-in addition.
   "json_object"}` (support verified live; see the flag constant in
   `glm.py`). Validation never trusts the hint — `chat_structured` always
   parses + validates.
+- **Tools are provider-neutral too (Phase 4).** The neutral `chat()` takes
+  OpenAI-style `tools` + `tool_choice="auto"|"none"` and returns
+  `tool_calls` as `ToolCall` records whose `arguments` stay raw JSON
+  strings — provider adapters convert formats both ways and never parse
+  business arguments (that is the tool layer's job, once, with Pydantic).
+- **Allowlist registry = security boundary.** The model can reach exactly
+  the functions in `TOOL_REGISTRY`; unknown names fail loudly. No `eval`,
+  no `globals()`, no dynamic imports.
+- **Bounded loop, bounded tool results.** `MAX_AGENT_STEPS=4` (no
+  `while True`); tool answers are projections (≤5 articles, abstracts
+  truncated at 1500 chars **with an explicit marker**) so multi-step
+  conversations stay affordable and nothing is cut silently.
+- **Fail fast in the agent (Phase 4 policy).** Malformed tool arguments,
+  unknown tools and PubMed errors abort the run with distinguishable
+  exceptions instead of being retried or "repaired" — observable first.
 - **Extraction, not interpretation.** The `SearchIntent` prompt forbids
   inferring biology the user did not state; the schema rejects extra fields
   (`extra="forbid"`) so violations are loud, not silently dropped.
@@ -208,7 +257,9 @@ makes a future `QwenClient`/`DeepSeekClient` a drop-in addition.
 - File/parse failures → `GeneFileError`; PubMed network/response failures →
   `PubMedError`; GLM request/response failures → `LLMRequestError`; LLM
   output that is invalid JSON or fails schema validation →
-  `StructuredOutputError` — all user-readable, mapped to exit code 1.
+  `StructuredOutputError`; invalid/unknown tool calls and tool failures →
+  `ToolExecutionError`; step-budget exhaustion → `AgentLoopError` — all
+  user-readable, mapped to exit code 1.
 - Missing data inside otherwise valid payloads (no abstract, no DOI, blank
   gene cell, absent usage block) is **not** an error — it degrades to
   `None` per the field contracts.

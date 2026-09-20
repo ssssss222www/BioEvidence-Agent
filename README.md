@@ -14,21 +14,20 @@ HTML biology report with PMID-backed citations.
 ## Current status
 
 ```text
-Phase 3 — Structured Output
+Phase 4 — Agent Loop
 ```
 
-(Phases 0-2 are complete and still available as the `pubmed` / `parse` /
-`llm` subcommands.)
+(Phases 0-3 are complete and still available as the `pubmed` / `parse` /
+`llm` / `structured` subcommands.)
 
 ## Current workflows
 
-Four independent capabilities so far — deliberately not connected yet:
-
 ```text
-Phase 0:                Phase 1:                Phase 2:        Phase 3:
-PubMed query            Input file              Messages        User intent (text)
-→ PubMed Tool           → File Parser           → GLM Client    → GLM + JSON + Pydantic
-→ Article[]             → GeneRecord[]          → LLMResponse   → SearchIntent
+Phase 0:  PubMed query → PubMed Tool → Article[]
+Phase 1:  Input file   → File Parser → GeneRecord[]
+Phase 2:  Messages     → GLM Client  → LLMResponse
+Phase 3:  User intent  → GLM + JSON + Pydantic → SearchIntent
+Phase 4:  Question → Agent Loop (GLM ⇄ search_pubmed tool, bounded) → cited answer
 ```
 
 ## Installation
@@ -104,6 +103,18 @@ Extract structured data from free text (Phase 3):
 python main.py structured --prompt "I want to investigate TP53 in breast cancer, focusing on DNA damage and apoptosis."
 ```
 
+Run the literature agent (Phase 4; needs `GLM_API_KEY` + `GLM_MODEL`):
+
+```bash
+python main.py agent --prompt "Find recent PubMed evidence about the role of TP53 in breast cancer."
+```
+
+The agent decides when to call its `search_pubmed` tool (validated
+arguments, allowlisted registry, at most 5 articles per search, hard cap of
+4 LLM steps) and produces a final answer citing only PMIDs it actually
+retrieved. Output: provider, model, steps, tool calls, retrieved PMIDs,
+answer. `--model` / `--temperature` flags available.
+
 Sends the text to GLM with a strict extraction prompt and JSON mode,
 parses the reply as JSON, validates it against the `SearchIntent` Pydantic
 schema, prints the result and saves it (plus model/usage metadata) to
@@ -120,15 +131,15 @@ python -m pytest
 Run only the real-network smoke tests:
 
 ```bash
-python -m pytest -m network        # NCBI E-utilities
-python -m pytest -m llm_network    # ZhipuAI GLM (needs GLM_API_KEY/GLM_MODEL)
+python -m pytest -m network         # NCBI E-utilities
+python -m pytest -m llm_network     # ZhipuAI GLM (needs GLM_API_KEY/GLM_MODEL)
+python -m pytest -m agent_network   # full agent: real GLM + real PubMed
 ```
 
 ## Roadmap
 
 ```text
-Phase 3 Structured output       ← current
-Phase 4 Tool calling / Agent loop
+Phase 4 Tool calling / Agent loop ← current
 Phase 5 NCBI Gene + Reactome
 Phase 6 Evidence ranking
 Phase 7 Citation verification
@@ -145,3 +156,4 @@ Phase 9 UI
 - `docs/phase-01-gene-file-parser.md` — Phase 1 execution record
 - `docs/phase-02-glm-client.md` — Phase 2 execution record
 - `docs/phase-03-structured-output.md` — Phase 3 execution record
+- `docs/phase-04-agent-loop.md` — Phase 4 execution record

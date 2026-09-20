@@ -1,5 +1,69 @@
 # Development Log
 
+## Phase 4 — Agent Loop (2026-09-19)
+
+First real composition: a bounded agent loop where GLM decides when to call
+`search_pubmed`, arguments are re-validated in Python, results return to
+the model, and the final answer cites only actually-retrieved PMIDs.
+Nothing committed or pushed in this phase (per instruction); suggested
+commit split at the end of the phase report.
+
+### Files added
+
+| file | purpose |
+|---|---|
+| `app/agent/__init__.py` | public re-exports |
+| `app/agent/errors.py` | `AgentError` / `ToolExecutionError` / `AgentLoopError` |
+| `app/agent/tools.py` | `PubMedSearchArgs`, tool definition (schema derived from the model), allowlist `TOOL_REGISTRY`, execution + bounded serialization |
+| `app/agent/loop.py` | `run_literature_agent` (MAX_AGENT_STEPS=4), `AgentResult` |
+| `app/prompts/literature_agent.py` | agent system prompt (evidence-honesty rules) |
+| `tests/test_agent_loop.py` | 37 offline tests + 1 opt-in `agent_network` integration test |
+| `docs/phase-04-agent-loop.md` | teaching-style execution record |
+
+### Files modified
+
+| file | change |
+|---|---|
+| `app/models/schemas.py` | +`ToolCall`; `LLMResponse.content` now `str \| None` and gained `tool_calls` (content-or-tool_calls invariant) |
+| `app/llm/base.py` | message contract v2 (4 shapes incl. assistant tool-call + tool result); protocol gains `tools` / `tool_choice`; `LLMRequestError` docstring updated |
+| `app/llm/glm.py` | `tools`/`tool_choice` params (auto/none only), neutral↔provider message & tool-call conversion, tool-call response parsing, content-None tolerance |
+| `app/llm/structured.py` | `content=None` guard → clean `StructuredOutputError` (never `json.loads(None)`) |
+| `main.py` | `agent` subcommand; description/epilog updated |
+| `pyproject.toml` | `agent_network` marker, excluded by default |
+| `tests/test_glm_client.py`, `tests/test_structured_output.py` | role-contract update ("tool" now valid with `tool_call_id`), +content-None regression test |
+| `README.md`, `docs/architecture.md`, `docs/data-contract.md` | Phase 4 updates |
+
+### Why it was designed this way
+
+- **Provider adapter converts, never executes** — `glm.py` only translates
+  neutral tools/messages/tool-calls to ZhipuAI wire format; arguments stay
+  raw JSON strings until the tool layer parses them once, with Pydantic.
+- **Allowlist registry** — the only bridge from model requests to Python;
+  unknown tools fail loudly. The security boundary is structural, not
+  conventional.
+- **Bounded everything** — 4 LLM steps max; ≤5 articles and 1500-char
+  (explicitly marked) abstracts per tool result; `used_pmids` taken from
+  tool results, never re-parsed from model text.
+- **Fail fast** — malformed arguments / unknown tools / PubMed errors abort
+  with distinguishable exceptions (no auto-repair, no retry) so behaviour
+  stays observable.
+
+### Verification summary
+
+- Baseline before work: 149 passed, tree clean.
+- Offline after implementation (3 test-bug fixes): **186 passed,
+  4 deselected**.
+- Live probe (ad hoc): SDK v2.1.5 + glm-4-flash accept `tools` and
+  `tool_choice="auto"`; `tool_calls` = `[{id, type, function:{name,
+  arguments}}]`; forced tool_choice dict accepted but **ineffective** →
+  not used, documented.
+- Live integration (`pytest -m agent_network`, glm-4-flash): **PASSED** —
+  1 real tool call, 5 real PMIDs, answer cites only retrieved PMIDs.
+- CLI acceptance: 2 steps, 1 tool call, 5 PMIDs, exit 0 (glm-5.3 still out
+  of balance; glm-4-flash used, as in Phase 3).
+
+---
+
 ## Phase 3 consistency patch (2026-09-19, pre-Phase 4)
 
 - `main.py`: `structured --temperature` argparse default changed from

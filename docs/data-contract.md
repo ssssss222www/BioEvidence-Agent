@@ -336,18 +336,21 @@ retry is pinned to `max_retries=2`; no additional retry loop (rationale in
 
 ## `LLMResponse`
 
-`app/models/schemas.py` (stdlib `dataclass`)
+`app/models/schemas.py` (stdlib `dataclass`; extended in Phase 4)
 
 | field | type | required | meaning |
 |---|---|---|---|
-| `content` | `str` | yes | the assistant's visible text answer; guaranteed non-empty by `GLMClient` |
+| `content` | `str \| None` | one of content/tool_calls | the assistant's visible text answer; `None` for tool-call-only answers; non-empty when set (clients enforce) |
+| `tool_calls` | `list[ToolCall]` | one of content/tool_calls | tool invocations requested by the model; `[]` for text answers |
 | `model` | `str \| None` | optional | model name echoed by the API; falls back to the requested model name |
-| `finish_reason` | `str \| None` | optional | e.g. `stop` / `length`; `None` when omitted |
+| `finish_reason` | `str \| None` | optional | e.g. `stop` / `tool_calls`; `None` when omitted |
 | `prompt_tokens` | `int \| None` | optional | usage counters; all `None` when the API returns no usage block |
 | `completion_tokens` | `int \| None` | optional | |
 | `total_tokens` | `int \| None` | optional | |
 
-Plus `to_dict()`. Upper layers consume only this type — never the raw SDK
+A valid response has at least one of non-empty `content` or a non-empty
+`tool_calls` list — clients raise `LLMRequestError` otherwise. Plus
+`to_dict()`. Upper layers consume only this type — never the raw SDK
 response object.
 
 ---
@@ -446,6 +449,103 @@ Written by `main.py structured`, UTF-8, `indent=2`, `ensure_ascii=False`.
 
 Validated structured data plus model/usage metadata only — no raw model
 output, no hidden reasoning.
+
+---
+
+# Phase 4 — Agent Loop
+
+## `ToolCall`
+
+`app/models/schemas.py` (stdlib `dataclass`)
+
+| field | type | meaning |
+|---|---|---|
+| `id` | `str` | provider-issued call id; must be echoed verbatim in the matching `role="tool"` message |
+| `name` | `str` | requested tool name (must exist in the registry to execute) |
+| `arguments` | `str` | **raw JSON string** exactly as the provider returned it — parsing/validation is the tool layer's job, never the provider adapter's |
+
+## Message shapes (`validate_messages`, contract v2)
+
+Four legal dict shapes (unknown keys dropped; `ValueError` with index on
+violation):
+
+```text
+{"role": "system"|"user", "content": str}                 # content non-empty
+{"role": "assistant", "content": str}                     # plain answer
+{"role": "assistant", "content": None|str,                # tool-call turn
+ "tool_calls": [{"id": str, "name": str, "arguments": str}]}
+{"role": "tool", "tool_call_id": str, "content": str}     # tool result
+```
+
+Assistant turns need non-empty content **or** a non-empty `tool_calls`
+list; each tool call needs non-empty `id`/`name` and string `arguments`;
+tool messages need non-empty `tool_call_id` and content. Phase 2/3 callers
+(system/user/assistant text) are unaffected.
+
+## `chat()` new parameters
+
+`tools: list[dict] | None = None`, `tool_choice: str | None = None`
+(neutral values: `"auto"`, `"none"`). `tools=None` reproduces the exact
+Phase 2/3 behaviour — no tool parameters are sent. `GLMClient` converts
+neutral tool definitions / messages / tool-calls to ZhipuAI wire format in
+both directions and never executes anything.
+
+## `PubMedSearchArgs` / `PUBMED_TOOL_DEFINITION`
+
+`app/agent/tools.py`
+
+| field | type | rules |
+|---|---|---|
+| `query` | `str` | stripped, non-empty; PubMed query syntax |
+| `max_results` | `int` | default 5; `1 <= max_results <= 5` (**agent policy** — the underlying `search_pubmed` stays general up to 200) |
+
+`extra="forbid"`. `PUBMED_TOOL_DEFINITION["function"]["parameters"]` is
+generated from `PubMedSearchArgs.model_json_schema()` (single source of
+truth; emits `additionalProperties: false`).
+
+## `execute_tool_call` / `ToolResult`
+
+`ToolCall → ToolResult` through the allowlist `TOOL_REGISTRY`
+(`{"search_pubmed": execute_pubmed_search}`). Error messages distinguish:
+`invalid JSON arguments` → `schema validation failed` → `unknown tool` →
+`PubMed execution failed`, all as `ToolExecutionError` (fail fast, no
+repair).
+
+`ToolResult.output` is a JSON string:
+
+```json
+{"query": "…", "retrieved_count": 2,
+ "articles": [{"pmid": "…", "title": "…", "abstract": "…",
+               "journal": "…", "publication_year": "…"}]}
+```
+
+Projection rules: at most 5 articles (`MAX_ARTICLES_TO_MODEL`); per-article
+fields pmid/title/abstract/journal/publication_year only (no authors bulk,
+DOI, pubmed_url, HTTP/debug internals); abstracts longer than
+`MAX_ABSTRACT_CHARS` (1500) are truncated **with an appended
+`[abstract truncated to 1500 characters]` marker** — never silently.
+`ToolResult.pmids` carries the actually-retrieved PMIDs (the basis of
+`AgentResult.used_pmids`).
+
+## `run_literature_agent` / `AgentResult`
+
+`app/agent/loop.py` — `(client, prompt, *, model=None, temperature=None) →
+AgentResult`. Loop: request → if tool_calls, execute every call in the
+turn sequentially and append paired messages, continue → first text answer
+returns. Hard cap `MAX_AGENT_STEPS = 4` → `AgentLoopError`.
+
+| field | type | meaning |
+|---|---|---|
+| `answer` | `str` | final model answer |
+| `steps` | `int` | LLM requests made (≤ 4) |
+| `tool_call_count` | `int` | tool calls executed |
+| `used_pmids` | `list[str]` | PMIDs from real tool results (never re-parsed from answer text), deduplicated in retrieval order |
+| `model` | `str \| None` | model name from the responses |
+| `prompt_tokens` / `completion_tokens` / `total_tokens` | `int \| None` | summed usage across steps (`None` if no step reported usage) |
+
+Errors: `ValueError` (empty prompt), `ToolExecutionError`,
+`AgentLoopError`, plus propagated `LLMError` subclasses. Nothing is
+persisted between runs.
 
 ---
 
