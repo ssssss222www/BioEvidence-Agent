@@ -39,7 +39,7 @@ from app.llm.base import (
     LLMRequestError,
     validate_messages,
 )
-from app.models.schemas import LLMResponse
+from app.models.schemas import LLMResponse, ToolCall
 
 DEFAULT_TIMEOUT_SECONDS = 60.0
 SDK_MAX_RETRIES = 2  # rely on the SDK's built-in retry, nothing on top
@@ -93,11 +93,13 @@ class GLMClient:
 
     def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict],
         *,
         model: str | None = None,
         temperature: float | None = None,
         json_mode: bool = False,
+        tools: list[dict] | None = None,
+        tool_choice: str | None = None,
     ) -> LLMResponse:
         """One non-streaming chat completion against the GLM API.
 
@@ -106,6 +108,12 @@ class GLMClient:
         API constrain its reply to a JSON object. It does not validate the
         reply; callers wanting trustworthy data use
         ``app/llm/structured.py``.
+
+        Phase 4: ``tools`` is a list of OpenAI-style tool definitions;
+        ``tool_choice="auto"`` lets the model decide. Neutral assistant
+        tool-call / tool-result messages are translated to ZhipuAI's wire
+        format, and ZhipuAI ``tool_calls`` are parsed into neutral
+        :class:`ToolCall` records. This method never executes tools.
         """
         messages = validate_messages(messages)
         resolved_model = (model or self._default_model or "").strip()
@@ -116,7 +124,7 @@ class GLMClient:
             )
         request: dict = {
             "model": resolved_model,
-            "messages": messages,
+            "messages": _to_provider_messages(messages),
             "stream": False,  # fixed in Phase 2 to keep the flow simple
         }
         if temperature is not None:
@@ -125,6 +133,16 @@ class GLMClient:
             request["response_format"] = {"type": "json_object"}
         # json_mode=True with GLM_JSON_MODE_SUPPORTED == False intentionally
         # sends nothing: the prompt must then carry the JSON instruction.
+        if tools is not None:
+            if not tools:
+                raise ValueError("tools must be a non-empty list when provided")
+            request["tools"] = tools
+            if tool_choice is not None:
+                if tool_choice not in ("auto", "none"):
+                    raise ValueError(
+                        f"tool_choice must be 'auto' or 'none', got {tool_choice!r}"
+                    )
+                request["tool_choice"] = tool_choice
         try:
             raw = self._client.chat.completions.create(**request)
         except zhipuai.ZhipuAIError as exc:
@@ -188,8 +206,9 @@ def _normalize_response(raw: object, requested_model: str) -> LLMResponse:
     """Extract an :class:`LLMResponse` from a raw SDK response object.
 
     Uses ``getattr`` throughout because providers/models vary in which
-    attributes they populate; anything missing degrades to ``None`` except
-    the assistant text itself, which is mandatory.
+    attributes they populate. A response must yield at least one of
+    non-empty text content or a non-empty tool-call list; anything else is
+    an unusable body.
     """
     choices = getattr(raw, "choices", None)
     if not choices:
@@ -200,8 +219,11 @@ def _normalize_response(raw: object, requested_model: str) -> LLMResponse:
     message = getattr(choice, "message", None)
     content = getattr(message, "content", None) if message is not None else None
     if not isinstance(content, str) or not content.strip():
+        content = None  # e.g. tool-call-only answers carry content=None
+    tool_calls = _parse_provider_tool_calls(message)
+    if content is None and not tool_calls:
         raise LLMRequestError(
-            "GLM response has empty assistant content "
+            "GLM response has empty assistant content and no tool_calls "
             f"(finish_reason={getattr(choice, 'finish_reason', None)!r})"
         )
     usage = getattr(raw, "usage", None)
@@ -214,12 +236,73 @@ def _normalize_response(raw: object, requested_model: str) -> LLMResponse:
 
     return LLMResponse(
         content=content,
+        tool_calls=tool_calls,
         model=getattr(raw, "model", None) or requested_model,
         finish_reason=getattr(choice, "finish_reason", None),
         prompt_tokens=usage_token("prompt_tokens"),
         completion_tokens=usage_token("completion_tokens"),
         total_tokens=usage_token("total_tokens"),
     )
+
+
+def _parse_provider_tool_calls(message: object) -> list[ToolCall]:
+    """ZhipuAI ``message.tool_calls`` → neutral :class:`ToolCall` list.
+
+    Provider structure (verified live, SDK v2.1.5 / glm-4-flash, 2026-09-19):
+    ``[{id, type: "function", function: {name, arguments: "<json str>"}}]``.
+    ``arguments`` stays a raw JSON string — business parsing belongs to the
+    tool layer, not the provider adapter.
+    """
+    raw_calls = getattr(message, "tool_calls", None) if message is not None else None
+    if not raw_calls:
+        return []
+    calls: list[ToolCall] = []
+    for raw_call in raw_calls:
+        function = getattr(raw_call, "function", None)
+        call_id = (getattr(raw_call, "id", None) or "").strip()
+        name = (getattr(function, "name", None) or "").strip()
+        arguments = getattr(function, "arguments", None)
+        if not call_id or not name or not isinstance(arguments, str):
+            raise LLMRequestError(
+                "GLM tool_calls entry is missing id, name, or string "
+                f"arguments: {_summarize(raw_call)}"
+            )
+        calls.append(ToolCall(id=call_id, name=name, arguments=arguments))
+    return calls
+
+
+def _to_provider_messages(messages: list[dict]) -> list[dict]:
+    """Neutral message dicts → ZhipuAI wire format.
+
+    Differences from the neutral form: assistant tool calls use ZhipuAI's
+    nested ``{"id", "type": "function", "function": {name, arguments}}``
+    shape. System/user/assistant-text/tool messages pass through unchanged
+    (already wire-compatible). Unknown keys were already dropped by
+    ``validate_messages``.
+    """
+    provider_messages: list[dict] = []
+    for message in messages:
+        if message["role"] == "assistant" and "tool_calls" in message:
+            provider_messages.append(
+                {
+                    "role": "assistant",
+                    "content": message["content"],
+                    "tool_calls": [
+                        {
+                            "id": call["id"],
+                            "type": "function",
+                            "function": {
+                                "name": call["name"],
+                                "arguments": call["arguments"],
+                            },
+                        }
+                        for call in message["tool_calls"]
+                    ],
+                }
+            )
+        else:
+            provider_messages.append(dict(message))
+    return provider_messages
 
 
 def _summarize(raw: object) -> str:

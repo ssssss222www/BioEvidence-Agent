@@ -184,6 +184,13 @@ def test_chat_structured_natural_language_rejected():
         )
 
 
+def test_chat_structured_rejects_tool_call_only_response():
+    """Phase 4 contract: a content=None (tool-call-only) response must raise
+    a clear StructuredOutputError, never json.loads(None) -> TypeError."""
+    with pytest.raises(StructuredOutputError, match="no text content"):
+        chat_structured(FakeLLMClient(None), [], SearchIntent)
+
+
 def test_chat_structured_json_array_rejected_by_schema():
     with pytest.raises(StructuredOutputError, match="schema validation failed"):
         chat_structured(FakeLLMClient("[1, 2, 3]"), [], SearchIntent)

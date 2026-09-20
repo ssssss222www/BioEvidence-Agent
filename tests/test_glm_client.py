@@ -121,10 +121,12 @@ def test_empty_messages_rejected(sdk):
 
 
 def test_invalid_role_rejected(sdk):
-    with pytest.raises(ValueError, match=r"invalid role 'tool'"):
-        GLMClient().chat([{"role": "tool", "content": "x"}])
+    # "tool" became a valid role in Phase 4 (with tool_call_id); use roles
+    # that are invalid in any shape here.
     with pytest.raises(ValueError, match=r"invalid role 'developer'"):
         GLMClient().chat([{"role": "developer", "content": "x"}])
+    with pytest.raises(ValueError, match=r"invalid role 'function'"):
+        GLMClient().chat([{"role": "function", "content": "x"}])
 
 
 def test_blank_content_rejected(sdk):

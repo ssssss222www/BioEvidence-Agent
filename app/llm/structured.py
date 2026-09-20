@@ -96,6 +96,14 @@ def chat_structured(
     response = client.chat(
         messages, model=model, temperature=temperature, json_mode=json_mode
     )
+    if not isinstance(response.content, str) or not response.content.strip():
+        # e.g. a tool-call-only response; keep the Phase 3 validation
+        # boundary clean instead of letting json.loads(None) raise TypeError.
+        raise StructuredOutputError(
+            "Model returned no text content to parse as JSON "
+            f"(content={response.content!r}, "
+            f"tool_calls={len(response.tool_calls)})"
+        )
     try:
         payload = json.loads(response.content)
     except json.JSONDecodeError as exc:

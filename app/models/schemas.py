@@ -6,8 +6,9 @@ Core records shared across phases:
   returned by NCBI EFetch.
 - :class:`GeneRecord` (Phase 1): one cleaned gene row from a user-supplied
   differential-analysis / gene-list file.
-- :class:`LLMResponse` (Phase 2): provider-neutral result of one chat
-  completion call.
+- :class:`LLMResponse` (Phase 2/4): provider-neutral result of one chat
+  completion call — text content and/or tool calls.
+- :class:`ToolCall` (Phase 4): one tool invocation requested by the model.
 
 Every later phase (LLM planning, evidence ranking, HTML report) will consume
 these same shapes, so the models are kept deliberately small and
@@ -122,6 +123,21 @@ class GeneRecord:
 
 
 @dataclass
+class ToolCall:
+    """One tool invocation requested by the model (Phase 4).
+
+    ``arguments`` is kept as the **raw JSON string** the provider returned
+    — the provider layer does not parse business arguments. Validation and
+    parsing happen in the tool-execution layer
+    (``app/agent/tools.py``), the single place that knows the tool schemas.
+    """
+
+    id: str
+    name: str
+    arguments: str
+
+
+@dataclass
 class LLMResponse:
     """Result of one chat completion call, normalized across providers.
 
@@ -132,25 +148,30 @@ class LLMResponse:
     ====================  ==========  =========================================
     field                 required    notes
     ====================  ==========  =========================================
-    content               yes         The assistant's visible text answer.
-                                      Guaranteed non-empty by the clients
-                                      that construct this class.
+    content               no          The assistant's visible text answer.
+                                      ``None`` when the model answered with
+                                      tool calls only. When set, guaranteed
+                                      non-empty (clients enforce this).
+    tool_calls            no          Tool invocations the model requested;
+                                      ``[]`` for plain-text answers.
     model                 no          Model name as reported by the API;
                                       falls back to the requested model name
                                       when the API does not echo one.
-    finish_reason         no          e.g. ``"stop"`` / ``"length"``;
+    finish_reason         no          e.g. ``"stop"`` / ``"tool_calls"``;
                                       ``None`` when the API omits it.
     prompt_tokens         no          Usage counters; all ``None`` when the
     completion_tokens     no          API returns no usage block (allowed).
     total_tokens          no
     ====================  ==========  =========================================
 
-    Hidden reasoning / chain-of-thought fields that some providers return
-    (e.g. ``reasoning_content``) are deliberately **not** part of this
-    contract: Phase 2 does not use or persist them for business output.
+    A valid response has **at least one** of non-empty ``content`` or a
+    non-empty ``tool_calls`` list — clients raise otherwise. Hidden
+    reasoning / chain-of-thought fields (``reasoning_content``) are
+    deliberately not part of this contract.
     """
 
-    content: str
+    content: str | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
     model: str | None = None
     finish_reason: str | None = None
     prompt_tokens: int | None = None
