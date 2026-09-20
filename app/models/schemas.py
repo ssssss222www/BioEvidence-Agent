@@ -9,6 +9,8 @@ Core records shared across phases:
 - :class:`LLMResponse` (Phase 2/4): provider-neutral result of one chat
   completion call — text content and/or tool calls.
 - :class:`ToolCall` (Phase 4): one tool invocation requested by the model.
+- :class:`GeneInfo` (Phase 5): NCBI Gene record (curated database fact).
+- :class:`ReactomePathway` (Phase 5): Reactome pathway mapping for a gene.
 
 Every later phase (LLM planning, evidence ranking, HTML report) will consume
 these same shapes, so the models are kept deliberately small and
@@ -177,6 +179,99 @@ class LLMResponse:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
+
+    def to_dict(self) -> dict:
+        """Plain dict for JSON serialization (``json.dumps`` friendly)."""
+        return asdict(self)
+
+
+@dataclass
+class GeneInfo:
+    """One NCBI Gene record (Phase 5) — curated database fact, not literature.
+
+    Source: NCBI E-utilities ESearch (db=gene) + ESummary (db=gene).
+    Field availability per real ESummary responses (verified 2026-09-20):
+
+    ====================  ==========  =========================================
+    field                 required    notes
+    ====================  ==========  =========================================
+    gene_id               yes         NCBI GeneID (e.g. "7157"). Distinct from
+                                      the *symbol* "TP53" — never conflate.
+    symbol                yes         current official symbol in NCBI's casing
+                                      (lookups match case-insensitively, but
+                                      this value is always the official one;
+                                      ``Trp53`` mouse ≠ ``TP53`` human)
+    name                  no          full descriptive name (ESummary
+                                      ``description``, e.g. "tumor protein p53")
+    organism              no          scientific name, e.g. "Homo sapiens"
+    tax_id                no          NCBI taxonomy id as string ("9606")
+    chromosome            no          e.g. "17"
+    map_location          no          cytogenetic location, e.g. "17p13.1"
+    aliases               yes (list)  other symbols/aliases; [] when absent
+    summary               no          NCBI Gene summary text (can be long;
+                                      truncated only at serialization time)
+    ncbi_url              yes         derived from gene_id:
+                                      https://www.ncbi.nlm.nih.gov/gene/{gene_id}
+    ====================  ==========  =========================================
+    """
+
+    gene_id: str
+    symbol: str
+    name: str | None = None
+    organism: str | None = None
+    tax_id: str | None = None
+    chromosome: str | None = None
+    map_location: str | None = None
+    aliases: list[str] = field(default_factory=list)
+    summary: str | None = None
+    ncbi_url: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.ncbi_url:
+            self.ncbi_url = f"https://www.ncbi.nlm.nih.gov/gene/{self.gene_id}"
+
+    def to_dict(self) -> dict:
+        """Plain dict for JSON serialization (``json.dumps`` friendly)."""
+        return asdict(self)
+
+
+@dataclass
+class ReactomePathway:
+    """One Reactome pathway that a gene identifier maps to (Phase 5).
+
+    Source: Reactome Analysis Service ``POST /identifiers/``.
+    Field availability per real responses (verified 2026-09-20):
+
+    ====================  ==========  =========================================
+    field                 required    notes
+    ====================  ==========  =========================================
+    stable_id             yes         e.g. "R-HSA-6804754"; always taken from
+                                      the real API — never model-generated.
+    name                  yes         pathway display name
+    species               no          e.g. "Homo sapiens" (pathway species)
+    is_disease            no          Reactome ``inDisease`` flag; disease
+                                      pathways are included but labelled.
+    is_inferred           no          always ``None``: the Analysis Service
+                                      does not report an inference flag.
+    url                   yes         derived from stable_id:
+                                      https://reactome.org/content/detail/{id}
+    ====================  ==========  =========================================
+
+    Semantics: "gene maps to pathway" means participation/association in the
+    curated Reactome model — NOT a causal claim that the gene regulates the
+    pathway.
+    """
+
+    stable_id: str
+    name: str
+    species: str | None = None
+    is_disease: bool | None = None
+    is_inferred: bool | None = None
+    url: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.url:
+            self.url = f"https://reactome.org/content/detail/{self.stable_id}"
 
     def to_dict(self) -> dict:
         """Plain dict for JSON serialization (``json.dumps`` friendly)."""

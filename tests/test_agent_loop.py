@@ -21,7 +21,7 @@ import main as main_module
 from app.agent import (
     MAX_ABSTRACT_CHARS,
     MAX_ARTICLES_TO_MODEL,
-    PUBMED_TOOL_DEFINITION,
+    SEARCH_PUBMED_TOOL,
     AgentLoopError,
     PubMedSearchArgs,
     ToolExecutionError,
@@ -161,7 +161,10 @@ def test_agent_prompt_and_tool_request_shape(fake_pubmed):
     call = client.calls[0]
     assert call["messages"][0]["role"] == "system"
     assert call["messages"][1] == {"role": "user", "content": "hello"}
-    assert call["tools"] == [PUBMED_TOOL_DEFINITION]
+    from app.agent.tools import TOOL_DEFINITIONS, TOOL_REGISTRY
+
+    assert call["tools"] == [TOOL_DEFINITIONS[name] for name in TOOL_REGISTRY]
+    assert len(call["tools"]) == 3  # Phase 5: three-tool catalogue
     assert call["tool_choice"] == "auto"
     assert call["temperature"] == 0.2
     assert call["model"] == "glm-4-flash"
@@ -245,7 +248,8 @@ def test_tool_result_serialization_fields_only(fake_pubmed):
     run_literature_agent(client, "q")
     tool_message = client.calls[1]["messages"][3]
     payload = json.loads(tool_message["content"])
-    assert set(payload) == {"query", "retrieved_count", "articles"}
+    assert set(payload) == {"source", "query", "retrieved_count", "articles"}
+    assert payload["source"] == "PubMed"  # Phase 5 provenance tag
     article = payload["articles"][0]
     assert set(article) == {"pmid", "title", "abstract", "journal", "publication_year"}
     assert "authors" not in article and "doi" not in article
@@ -309,10 +313,10 @@ def test_search_args_schema_and_definition():
     assert args.max_results == 3
     assert PubMedSearchArgs.model_validate({"query": "TP53"}).max_results == 5
     # tool definition derives its schema from the same model (one source)
-    schema = PUBMED_TOOL_DEFINITION["function"]["parameters"]
+    schema = SEARCH_PUBMED_TOOL["function"]["parameters"]
     assert schema == PubMedSearchArgs.model_json_schema()
     assert schema["additionalProperties"] is False
-    assert PUBMED_TOOL_DEFINITION["function"]["name"] == "search_pubmed"
+    assert SEARCH_PUBMED_TOOL["function"]["name"] == "search_pubmed"
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +354,7 @@ def test_max_agent_steps_exhaustion(fake_pubmed):
     )
     with pytest.raises(AgentLoopError, match="MAX_AGENT_STEPS"):
         run_literature_agent(looping, "q")
-    assert len(looping.calls) == 4  # hard cap, no while True
+    assert len(looping.calls) == 6  # hard cap raised 4→6 in Phase 5 review
 
 
 def test_response_without_content_or_tool_calls_raises(sdk):
@@ -363,7 +367,7 @@ def test_response_without_content_or_tool_calls_raises(sdk):
         LLMRequestError, match="empty assistant content and no tool_calls"
     ):
         client.chat(
-            [{"role": "user", "content": "hi"}], tools=[PUBMED_TOOL_DEFINITION]
+            [{"role": "user", "content": "hi"}], tools=[SEARCH_PUBMED_TOOL]
         )
 
 
@@ -459,11 +463,11 @@ def test_tools_and_tool_choice_sent(sdk):
     client = glm_module.GLMClient()
     client.chat(
         [{"role": "user", "content": "hi"}],
-        tools=[PUBMED_TOOL_DEFINITION],
+        tools=[SEARCH_PUBMED_TOOL],
         tool_choice="auto",
     )
     request = sdk.instances[0].requests[0]
-    assert request["tools"] == [PUBMED_TOOL_DEFINITION]
+    assert request["tools"] == [SEARCH_PUBMED_TOOL]
     assert request["tool_choice"] == "auto"
     assert "response_format" not in request
 
@@ -473,7 +477,7 @@ def test_invalid_tool_choice_rejected(sdk):
     with pytest.raises(ValueError, match="tool_choice"):
         client.chat(
             [{"role": "user", "content": "hi"}],
-            tools=[PUBMED_TOOL_DEFINITION],
+            tools=[SEARCH_PUBMED_TOOL],
             tool_choice="required",
         )
 
@@ -492,7 +496,7 @@ def test_provider_tool_calls_parsed_to_neutral_toolcall(sdk):
         ],
     )
     response = glm_module.GLMClient().chat(
-        [{"role": "user", "content": "hi"}], tools=[PUBMED_TOOL_DEFINITION]
+        [{"role": "user", "content": "hi"}], tools=[SEARCH_PUBMED_TOOL]
     )
     assert response.content is None
     assert response.tool_calls == [
@@ -510,7 +514,7 @@ def test_neutral_messages_converted_to_provider_format(sdk):
          ]},
         {"role": "tool", "tool_call_id": "c1", "content": '{"retrieved_count": 0}'},
     ]
-    client.chat(messages, tools=[PUBMED_TOOL_DEFINITION], tool_choice="auto")
+    client.chat(messages, tools=[SEARCH_PUBMED_TOOL], tool_choice="auto")
     sent = sdk.instances[0].requests[0]["messages"]
     assert sent[1]["tool_calls"][0] == {
         "id": "c1",

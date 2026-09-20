@@ -532,7 +532,7 @@ DOI, pubmed_url, HTTP/debug internals); abstracts longer than
 `app/agent/loop.py` — `(client, prompt, *, model=None, temperature=None) →
 AgentResult`. Loop: request → if tool_calls, execute every call in the
 turn sequentially and append paired messages, continue → first text answer
-returns. Hard cap `MAX_AGENT_STEPS = 4` → `AgentLoopError`.
+returns. Hard cap `MAX_AGENT_STEPS = 6` → `AgentLoopError`.
 
 | field | type | meaning |
 |---|---|---|
@@ -546,6 +546,98 @@ returns. Hard cap `MAX_AGENT_STEPS = 4` → `AgentLoopError`.
 Errors: `ValueError` (empty prompt), `ToolExecutionError`,
 `AgentLoopError`, plus propagated `LLMError` subclasses. Nothing is
 persisted between runs.
+
+---
+
+# Phase 5 — Multi-tool Agent
+
+## `GeneInfo`
+
+`app/models/schemas.py` (stdlib `dataclass`; source: NCBI
+ESearch(db=gene)+ESummary — field availability verified 2026-09-20)
+
+| field | type | required | meaning |
+|---|---|---|---|
+| `gene_id` | `str` | yes | NCBI GeneID, e.g. "7157" — distinct from the symbol "TP53" |
+| `symbol` | `str` | yes | current official symbol in NCBI's casing (lookup matches case-insensitively; output is always official) |
+| `name` | `str \| None` | no | full descriptive name (ESummary `description`) |
+| `organism` | `str \| None` | no | scientific name, e.g. "Homo sapiens" |
+| `tax_id` | `str \| None` | no | taxonomy id as string ("9606") |
+| `chromosome` | `str \| None` | no | e.g. "17" |
+| `map_location` | `str \| None` | no | e.g. "17p13.1" |
+| `aliases` | `list[str]` | yes (list) | other symbols; `[]` when absent |
+| `summary` | `str \| None` | no | NCBI Gene summary (bounded at serialization) |
+| `ncbi_url` | `str` | yes | derived `https://www.ncbi.nlm.nih.gov/gene/{gene_id}` |
+
+## `ReactomePathway`
+
+`app/models/schemas.py` (source: Reactome Analysis Service)
+
+| field | type | required | meaning |
+|---|---|---|---|
+| `stable_id` | `str` | yes | e.g. "R-HSA-6804754"; always from the real API |
+| `name` | `str` | yes | pathway display name |
+| `species` | `str \| None` | no | pathway species name |
+| `is_disease` | `bool \| None` | no | Reactome `inDisease` flag |
+| `is_inferred` | `bool \| None` | no | always `None` — endpoint does not report inference |
+| `url` | `str` | yes | derived `https://reactome.org/content/detail/{stable_id}` |
+
+Semantics: mapping = participation/association, never causal regulation.
+
+## `get_gene_info` / `get_reactome_pathways`
+
+`app/tools/ncbi_gene.py` / `app/tools/reactome.py`
+
+- `get_gene_info(gene, species) -> GeneInfo` — ESearch term
+  `"<gene>[sym] AND <species>[orgn]"` (the `[sym]` field is
+  case-insensitive server-side), then ESummary. Resolution: exact symbol
+  match, **case-insensitive** (`casefold()`; no substring/fuzzy matching);
+  the returned `GeneInfo` always carries NCBI's official symbol casing;
+  zero → `NCBIGeneError` ("no … record"); >1 exact → `NCBIGeneError`
+  (ambiguity, candidates listed). No implicit species default. HTTP:
+  timeout + User-Agent + bounded transient retries; optional NCBI
+  identity via env.
+- `get_reactome_pathways(gene, species, max_results=5) ->
+  list[ReactomePathway]` — Analysis Service `POST /identifiers/`
+  (text/plain symbol, `pageSize=max_results`). API analysis-result order
+  preserved (verified stable; the order is not a claim of biological
+  importance), de-duplicated by `stable_id`, sliced to
+  `max_results` (1..10; `ValueError` otherwise). Empty mapping → `[]`.
+  Failures → `ReactomeError` (network / HTTP / malformed).
+
+## Tool args & registry (Phase 5)
+
+| model | fields | rules |
+|---|---|---|
+| `GeneInfoArgs` | `gene`, `species` | stripped, non-empty; `extra="forbid"` |
+| `ReactomePathwayArgs` | `gene`, `species`, `max_results` | default 5, `1..10`; `extra="forbid"` |
+
+`TOOL_REGISTRY` = `{"search_pubmed", "get_gene_info",
+"get_reactome_pathways"}` (the only executable functions);
+`TOOL_DEFINITIONS` maps registry names → OpenAI-style definitions whose
+`parameters` come from the args models' `model_json_schema()`.
+
+## Tool-result provenance & serialization (Phase 5)
+
+Every `ToolResult.output` top level now carries a `"source"` tag
+(`"PubMed"` / `"NCBI Gene"` / `"Reactome"` — the PubMed tag was added as
+a small compatible change). Shapes:
+
+```json
+{"source": "NCBI Gene", "query": {"gene": "…", "species": "…"}, "gene": {…}}
+{"source": "Reactome", "query": {…}, "pathways": [ … ≤ max_results … ],
+ "retrieved_count": 2}
+{"source": "PubMed", "query": "…", "retrieved_count": 5, "articles": [ … ]}
+```
+
+Size policy: gene summaries ≤ 1200 chars (`MAX_SUMMARY_CHARS`), abstracts
+≤ 1500 chars, articles ≤ 5, pathways ≤ 10 — all truncations append an
+explicit `[… truncated to N characters]` marker. `ToolResult` carries
+`pmids` / `gene_ids` / `reactome_ids`; `AgentResult` exposes them as
+`used_pmids` / `used_gene_ids` / `used_reactome_ids` (real tool outputs,
+never regex-parsed from answers). The agent loop itself was not
+restructured: the catalogue is derived from `TOOL_DEFINITIONS` keyed by
+registry name.
 
 ---
 

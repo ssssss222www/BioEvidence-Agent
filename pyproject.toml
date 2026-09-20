@@ -26,10 +26,13 @@ dev = [
 testpaths = ["tests"]
 pythonpath = ["."]
 # Network tests hit real external APIs; skip them by default so offline/CI
-# runs stay green. Run explicitly with: pytest -m network / llm_network / agent_network
-addopts = "-m 'not network and not llm_network and not agent_network'"
+# runs stay green. Run explicitly with: pytest -m network / llm_network /
+# agent_network / ncbi_network / reactome_network
+addopts = "-m 'not network and not llm_network and not agent_network and not ncbi_network and not reactome_network'"
 markers = [
     "network: tests that call the real NCBI E-utilities (deselect with -m 'not network')",
     "llm_network: tests that call the real ZhipuAI GLM API (need GLM_API_KEY/GLM_MODEL; deselect with -m 'not llm_network')",
     "agent_network: end-to-end agent tests calling real GLM + real PubMed (needs GLM_API_KEY/GLM_MODEL; deselect with -m 'not agent_network')",
+    "ncbi_network: tests calling the real NCBI Gene E-utilities (deselect with -m 'not ncbi_network')",
+    "reactome_network: tests calling the real Reactome Analysis Service (deselect with -m 'not reactome_network')",
 ]

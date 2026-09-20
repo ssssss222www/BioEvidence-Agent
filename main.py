@@ -459,6 +459,12 @@ def run_agent(args: argparse.Namespace) -> int:
     print(f"Model: {result.model}")
     print(f"Steps: {result.steps} (max {MAX_AGENT_STEPS})")
     print(f"Tool calls: {result.tool_call_count}")
+    gene_ids = ", ".join(result.used_gene_ids) if result.used_gene_ids else "(none)"
+    print(f"Retrieved Gene IDs: {gene_ids}")
+    reactome_ids = (
+        ", ".join(result.used_reactome_ids) if result.used_reactome_ids else "(none)"
+    )
+    print(f"Retrieved Reactome IDs: {reactome_ids}")
     pmids = ", ".join(result.used_pmids) if result.used_pmids else "(none)"
     print(f"Retrieved PMIDs: {pmids}")
     if result.total_tokens is not None:
