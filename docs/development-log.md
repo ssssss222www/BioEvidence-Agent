@@ -1,5 +1,94 @@
 # Development Log
 
+## Phase 5 final review patch (2026-09-20)
+
+Three-point correctness review, no new features:
+
+1. **Reactome wording** — replaced "significance-ranked / ranked pathway
+   list" phrasing with "API analysis-result order (its statistical
+   ordering; not a claim of biological/causal/regulatory importance)" in
+   `app/tools/reactome.py`, `docs/data-contract.md`, and the Phase 5
+   record. Endpoint unchanged.
+2. **MAX_AGENT_STEPS 4 → 6** (`app/agent/loop.py`) — a real Phase 5 run
+   already used 3 tool calls / 4 steps; 6 leaves room for synthesis plus
+   extra retrieval while staying a hard cap (still no `while True`).
+   Tests updated (exhaustion now expects exactly 6 LLM calls) and a new
+   regression asserts a 3-turn multi-tool sequence finishes in 4 ≤ 6
+   steps. README/architecture/data-contract updated.
+3. **NCBI Gene symbol casing** — resolution now matches the requested
+   symbol case-insensitively (`casefold()`), still exact (no
+   substring/fuzzy matching), still species-scoped; the returned
+   `GeneInfo` always carries NCBI's official ESummary casing. Verified
+   live that `[sym]` is case-insensitive server-side (tp53+human → 7157;
+   trp53+Mus musculus → 22059). New offline tests cover
+   TP53/tp53/Trp53/trp53 combinations plus a casing-only ambiguity case;
+   a live `ncbi_network` test asserts lowercase requests return official
+   casing.
+
+---
+
+## Phase 5 — Multi-tool Biomedical Agent (2026-09-20, branch phase-05-multi-tool)
+
+One agent, one loop, three tools: NCBI Gene + Reactome + PubMed, with
+per-source provenance and facts-vs-evidence semantics. Nothing committed
+or pushed in this phase (per instruction).
+
+### Files added
+
+| file | purpose |
+|---|---|
+| `app/tools/ncbi_gene.py` | ESearch(db=gene)+ESummary lookup, exact-symbol resolution policy, `NCBIGeneError` |
+| `app/tools/reactome.py` | Analysis Service mapping, deterministic order/dedup/slice, `ReactomeError` |
+| `tests/test_ncbi_gene.py` | 14 offline tests (fixtures mirror the verified real responses) |
+| `tests/test_reactome.py` | 16 offline tests |
+| `tests/test_agent_multi_tool.py` | registry/selection/composition/provenance offline tests + opt-in `ncbi_network` / `reactome_network` / multi-tool `agent_network` tests |
+| `docs/phase-05-multi-tool-agent.md` | teaching-style execution record |
+
+### Files modified
+
+| file | change |
+|---|---|
+| `app/models/schemas.py` | +`GeneInfo`, `ReactomePathway` dataclasses (fields per verified API responses) |
+| `app/agent/tools.py` | +`GeneInfoArgs`/`ReactomePathwayArgs`; tool definitions renamed `SEARCH_PUBMED_TOOL` + new `GET_GENE_INFO_TOOL`/`GET_REACTOME_PATHWAYS_TOOL`; `TOOL_DEFINITIONS` keyed by registry name; registry → 3; `ToolResult` gained `gene_ids`/`reactome_ids`; all payloads tagged `"source"` (incl. PubMed); shared `_parse_tool_arguments` helper; gene-summary truncation |
+| `app/agent/loop.py` | catalogue from `TOOL_DEFINITIONS[registry]`; collects `used_gene_ids`/`used_reactome_ids` — no structural change, no per-tool branching |
+| `app/prompts/literature_agent.py` | three-tool selection guide, species-assumption rule, facts-vs-evidence semantics, per-namespace citation rules |
+| `main.py` | agent output: Retrieved Gene IDs / Reactome IDs / PMIDs |
+| `pyproject.toml` | `ncbi_network` / `reactome_network` markers, excluded by default |
+| `tests/test_agent_loop.py` | renamed definition imports; tools-catalogue assertion (3 definitions); PubMed payload `source` tag |
+| `README.md`, `docs/architecture.md`, `docs/data-contract.md` | Phase 5 updates |
+
+### Why it was designed this way
+
+- **Registry-driven, loop-agnostic.** The Phase 4 loop only needed its
+  catalogue source widened; that the abstraction held without per-tool
+  branching is the validation of the Phase 4 design.
+- **ESummary over EFetch (NCBI)** — verified to already provide every
+  field used; **Analysis Service over Content Service (Reactome)** —
+  direct symbol→ordered-pathways mapping in one call. Both choices
+  recorded with probe evidence; one implementation each.
+- **Deterministic resolution** — exact case-insensitive symbol + organism
+  field tags; ambiguity is an explicit error, never a silent pick.
+- **Provenance from tool outputs only** — `source` tags on results and
+  `used_*` id lists; identifiers are never re-parsed from model text.
+- **HTTP helper duplicated, not extracted** — avoiding a DRY refactor of
+  Phase 0's pubmed module (and its test monkeypatch seams), per phase
+  instruction.
+
+### Verification summary
+
+- Baseline before work: 186 passed, clean tree on `phase-05-multi-tool`.
+- Offline after implementation (2 test-authoring fixes): **233 passed,
+  7 deselected**.
+- Live: `ncbi_network` PASSED, `reactome_network` PASSED, multi-tool
+  `agent_network` PASSED (glm-4-flash; both tools really called; cited
+  GeneIDs/R-HSA IDs ⊆ tool results), Phase 4 PubMed `agent_network`
+  regression PASSED. CLI live runs verified tool selection (Case A) and
+  three-tool composition (Case D: 3 tool calls, 3 provenance lists).
+- One batch network run was killed externally (exit 137, no results
+  printed); individual re-runs all passed.
+
+---
+
 ## Phase 4 — Agent Loop (2026-09-19)
 
 First real composition: a bounded agent loop where GLM decides when to call
@@ -15,7 +104,7 @@ commit split at the end of the phase report.
 | `app/agent/__init__.py` | public re-exports |
 | `app/agent/errors.py` | `AgentError` / `ToolExecutionError` / `AgentLoopError` |
 | `app/agent/tools.py` | `PubMedSearchArgs`, tool definition (schema derived from the model), allowlist `TOOL_REGISTRY`, execution + bounded serialization |
-| `app/agent/loop.py` | `run_literature_agent` (MAX_AGENT_STEPS=4), `AgentResult` |
+| `app/agent/loop.py` | `run_literature_agent` (MAX_AGENT_STEPS=6), `AgentResult` |
 | `app/prompts/literature_agent.py` | agent system prompt (evidence-honesty rules) |
 | `tests/test_agent_loop.py` | 37 offline tests + 1 opt-in `agent_network` integration test |
 | `docs/phase-04-agent-loop.md` | teaching-style execution record |
@@ -41,7 +130,7 @@ commit split at the end of the phase report.
 - **Allowlist registry** — the only bridge from model requests to Python;
   unknown tools fail loudly. The security boundary is structural, not
   conventional.
-- **Bounded everything** — 4 LLM steps max; ≤5 articles and 1500-char
+- **Bounded everything** — 6 LLM steps max (raised from 4 in the Phase 5 review); ≤5 articles and 1500-char
   (explicitly marked) abstracts per tool result; `used_pmids` taken from
   tool results, never re-parsed from model text.
 - **Fail fast** — malformed arguments / unknown tools / PubMed errors abort

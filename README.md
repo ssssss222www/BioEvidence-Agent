@@ -14,11 +14,11 @@ HTML biology report with PMID-backed citations.
 ## Current status
 
 ```text
-Phase 4 — Agent Loop
+Phase 5 — Multi-tool Biomedical Agent
 ```
 
-(Phases 0-3 are complete and still available as the `pubmed` / `parse` /
-`llm` / `structured` subcommands.)
+(Phases 0-4 are complete; `pubmed` / `parse` / `llm` / `structured`
+subcommands unchanged.)
 
 ## Current workflows
 
@@ -28,6 +28,9 @@ Phase 1:  Input file   → File Parser → GeneRecord[]
 Phase 2:  Messages     → GLM Client  → LLMResponse
 Phase 3:  User intent  → GLM + JSON + Pydantic → SearchIntent
 Phase 4:  Question → Agent Loop (GLM ⇄ search_pubmed tool, bounded) → cited answer
+Phase 5:  One agent, one loop, three tools: search_pubmed + get_gene_info
+          (NCBI Gene) + get_reactome_pathways (Reactome), with per-source
+          provenance (PMIDs / GeneIDs / Reactome stable IDs)
 ```
 
 ## Installation
@@ -103,17 +106,24 @@ Extract structured data from free text (Phase 3):
 python main.py structured --prompt "I want to investigate TP53 in breast cancer, focusing on DNA damage and apoptosis."
 ```
 
-Run the literature agent (Phase 4; needs `GLM_API_KEY` + `GLM_MODEL`):
+Run the literature agent (Phases 4-5; needs `GLM_API_KEY` + `GLM_MODEL`):
 
 ```bash
 python main.py agent --prompt "Find recent PubMed evidence about the role of TP53 in breast cancer."
+python main.py agent --prompt "What is human TP53? Cite the GeneID."
+python main.py agent --prompt "Which Reactome pathways involve human TP53?"
+python main.py agent --prompt "Explain human TP53, its pathways, and breast cancer evidence."
 ```
 
-The agent decides when to call its `search_pubmed` tool (validated
-arguments, allowlisted registry, at most 5 articles per search, hard cap of
-4 LLM steps) and produces a final answer citing only PMIDs it actually
-retrieved. Output: provider, model, steps, tool calls, retrieved PMIDs,
-answer. `--model` / `--temperature` flags available.
+The agent has three tools behind one allowlist registry — `search_pubmed`
+(PubMed literature), `get_gene_info` (NCBI Gene database facts),
+`get_reactome_pathways` (Reactome pathway mappings) — and chooses/composes
+them per question. Every tool call is argument-validated with Pydantic;
+the loop is bounded (6 LLM steps); tool results are size-bounded with
+explicit truncation markers. Output includes retrieved Gene IDs, Reactome
+stable IDs and PMIDs (real provenance, never parsed from the answer), and
+the answer distinguishes curated database facts from literature evidence.
+`--model` / `--temperature` flags available.
 
 Sends the text to GLM with a strict extraction prompt and JSON mode,
 parses the reply as JSON, validates it against the `SearchIntent` Pydantic
@@ -131,16 +141,17 @@ python -m pytest
 Run only the real-network smoke tests:
 
 ```bash
-python -m pytest -m network         # NCBI E-utilities
-python -m pytest -m llm_network     # ZhipuAI GLM (needs GLM_API_KEY/GLM_MODEL)
-python -m pytest -m agent_network   # full agent: real GLM + real PubMed
+python -m pytest -m network            # NCBI E-utilities (PubMed)
+python -m pytest -m llm_network        # ZhipuAI GLM (needs GLM_API_KEY/GLM_MODEL)
+python -m pytest -m agent_network      # full agent: real GLM + real tools
+python -m pytest -m ncbi_network       # real NCBI Gene
+python -m pytest -m reactome_network   # real Reactome Analysis Service
 ```
 
 ## Roadmap
 
 ```text
-Phase 4 Tool calling / Agent loop ← current
-Phase 5 NCBI Gene + Reactome
+Phase 5 Multi-tool agent         ← current
 Phase 6 Evidence ranking
 Phase 7 Citation verification
 Phase 8 HTML report
@@ -157,3 +168,4 @@ Phase 9 UI
 - `docs/phase-02-glm-client.md` — Phase 2 execution record
 - `docs/phase-03-structured-output.md` — Phase 3 execution record
 - `docs/phase-04-agent-loop.md` — Phase 4 execution record
+- `docs/phase-05-multi-tool-agent.md` — Phase 5 execution record

@@ -1,11 +1,33 @@
 # Architecture
 
-## Overview (Phase 4)
+## Overview (Phase 5)
 
-Phases 0-3 built four independent capabilities. Phase 4 adds the first
-real composition — the **agent loop** joins the GLM client (Phase 2) with
-the PubMed tool (Phase 0). Gene-file parsing and structured extraction
-remain standalone.
+Phases 0-3 built four independent capabilities. Phase 4 added the agent
+loop (GLM + one PubMed tool). Phase 5 widens the loop's tool catalogue to
+three biomedical sources — still **one agent, one loop, one registry**:
+
+```text
+main.py (agent)
+   ↓
+run_literature_agent()          (app/agent/loop.py, MAX_AGENT_STEPS=6)
+   ↓ messages + [TOOL_DEFINITIONS[n] for n in TOOL_REGISTRY]
+GLMClient.chat(tools=…, tool_choice="auto")
+   ↓ tool_calls: list[ToolCall]
+execute_tool_call()             (app/agent/tools.py — allowlist registry)
+   ↓ json.loads → args model (Pydantic) → dispatch
+   ├── search_pubmed       → app/tools/pubmed.py    → Article[]          → PMIDs
+   ├── get_gene_info       → app/tools/ncbi_gene.py → GeneInfo           → GeneIDs
+   └── get_reactome_pathways → app/tools/reactome.py → ReactomePathway[] → R-IDs
+   ↓ bounded JSON projections, each tagged {"source": …}
+role="tool" messages (tool_call_id paired) → next loop step → final answer
+   ↓
+AgentResult(answer, steps, tool_call_count,
+            used_pmids / used_gene_ids / used_reactome_ids, usage)
+```
+
+NCBI Gene = ESearch(db=gene) + ESummary; Reactome = Analysis Service
+`POST /identifiers/` (endpoint choices verified live — see the Phase 5
+record). Gene-file parsing and structured extraction remain standalone.
 
 Component 1 (Phase 0) — PubMed retrieval:
 
@@ -83,29 +105,31 @@ StructuredLLMResult             validated SearchIntent + raw LLMResponse
 JSON saved by main.py           (outputs/search_intent.json)
 ```
 
-Component 5 (Phase 4) — the bounded literature-agent loop (first composition):
+Component 5 (Phases 4-5) — the bounded multi-tool literature agent:
 
 ```text
 main.py (agent)
    ↓
-run_literature_agent()          (app/agent/loop.py, MAX_AGENT_STEPS=4)
-   ↓ messages + [PUBMED_TOOL_DEFINITION]
+run_literature_agent()          (app/agent/loop.py, MAX_AGENT_STEPS=6)
+   ↓ messages + [TOOL_DEFINITIONS[n] for n in TOOL_REGISTRY]   (3 tools)
 GLMClient.chat(tools=…, tool_choice="auto")
    ↓ tool_calls: list[ToolCall]          (raw JSON arguments preserved)
-execute_tool_call()             (app/agent/tools.py)
-   ↓ json.loads → PubMedSearchArgs (Pydantic) → allowlist registry
-search_pubmed()                 (app/tools/pubmed.py, reused unchanged)
-   ↓ Article[]
-bounded JSON projection         (≤5 articles, abstracts ≤1500 chars, marked)
-   ↓ role="tool" message (tool_call_id paired 1:1)
-GLMClient.chat(messages + tool result)   ← next loop step
-   ↓ final text answer
-AgentResult                     (answer, steps, tool_call_count, used_pmids, usage)
+execute_tool_call()             (app/agent/tools.py, allowlist registry)
+   ↓ json.loads → args model (Pydantic) → dispatch
+   ├── search_pubmed         → app/tools/pubmed.py    (Phase 0, unchanged)
+   ├── get_gene_info         → app/tools/ncbi_gene.py (ESearch+ESummary db=gene)
+   └── get_reactome_pathways → app/tools/reactome.py  (Analysis Service)
+   ↓ bounded JSON projections, each tagged {"source": …}
+role="tool" message (tool_call_id paired 1:1)
+   ↓ next loop step → final text answer
+AgentResult                     (answer, steps, tool_call_count,
+                                 used_pmids / used_gene_ids / used_reactome_ids,
+                                 model, usage totals)
 ```
 
-The data contracts `Article`, `GeneRecord`, `LLMResponse`, `SearchIntent`
-and `ToolCall` are the currencies that later phases (evidence ranking,
-citation verification, HTML report) will build on.
+The data contracts `Article`, `GeneRecord`, `LLMResponse`, `SearchIntent`,
+`ToolCall`, `GeneInfo` and `ReactomePathway` are the currencies that later
+phases (evidence ranking, citation verification, HTML report) will build on.
 
 ## Directory layout
 
@@ -114,9 +138,10 @@ literature_agent/               project root (repo root; see note below)
 ├── app/                        importable Python package
 │   ├── agent/
 │   │   ├── errors.py           AgentError / ToolExecutionError / AgentLoopError
-│   │   ├── loop.py             bounded agent loop + AgentResult (MAX_AGENT_STEPS=4)
-│   │   └── tools.py            PubMedSearchArgs, tool definition, allowlist
-│   │                           registry, execution + bounded serialization
+│   │   ├── loop.py             bounded agent loop + AgentResult (MAX_AGENT_STEPS=6)
+│   │   └── tools.py            args models (PubMed/GeneInfo/Reactome), tool
+│   │                           definitions, 3-entry allowlist registry,
+│   │                           execution + bounded, source-tagged serialization
 │   ├── config.py               shared .env loader (NCBI + GLM variables)
 │   ├── llm/
 │   │   ├── base.py             LLMClient protocol (+tools/tool_choice), error
@@ -125,15 +150,20 @@ literature_agent/               project root (repo root; see note below)
 │   │   │                       (+ json_mode, tool conversion both directions)
 │   │   └── structured.py       chat_structured / extract_search_intent (Phase 3)
 │   ├── models/
-│   │   ├── schemas.py          Article, GeneRecord, LLMResponse, ToolCall
+│   │   ├── schemas.py          Article, GeneRecord, LLMResponse, ToolCall,
+│   │   │                       GeneInfo, ReactomePathway
 │   │   └── structured.py       SearchIntent Pydantic schema (LLM-validated data)
 │   ├── prompts/
-│   │   ├── literature_agent.py agent system prompt (Phase 4)
+│   │   ├── literature_agent.py agent system prompt (Phases 4-5)
 │   │   └── search_intent.py    extraction-only system prompt (Phase 3)
 │   ├── parsers/
 │   │   └── gene_file_parser.py gene/DEG file parser (Phase 1)
 │   └── tools/
-│       └── pubmed.py           PubMed tool: validation, HTTP, parsing, retries
+│       ├── ncbi_gene.py        NCBI Gene tool: ESearch(db=gene)+ESummary,
+│       │                       exact-symbol resolution policy, NCBIGeneError
+│       ├── pubmed.py           PubMed tool: validation, HTTP, parsing, retries
+│       └── reactome.py         Reactome tool: Analysis Service POST,
+│                               deterministic order/dedup, ReactomeError
 ├── docs/                       architecture / contracts / dev log / phase notes
 ├── examples/
 │   ├── example_queries.txt     sample PubMed queries
@@ -144,7 +174,11 @@ literature_agent/               project root (repo root; see note below)
 │   ├── test_gene_file_parser.py Phase 1 offline tests (tmp_path fixtures)
 │   ├── test_glm_client.py      Phase 2 offline tests + opt-in GLM smoke test
 │   ├── test_structured_output.py Phase 3 offline tests + opt-in extraction test
-│   └── test_agent_loop.py      Phase 4 offline tests + opt-in agent integration
+│   ├── test_agent_loop.py      Phase 4 offline tests + opt-in PubMed agent test
+│   ├── test_ncbi_gene.py       Phase 5 NCBI Gene offline tests
+│   ├── test_reactome.py        Phase 5 Reactome offline tests
+│   └── test_agent_multi_tool.py Phase 5 registry/selection/composition tests
+│                               + opt-in ncbi/reactome/multi-tool-agent tests
 ├── main.py                     CLI entry point (orchestration only, subcommands)
 ├── .env.example                template for NCBI_* and GLM_* variables
 ├── .gitignore                  ignores .env, outputs/*, prompt/, caches, venvs
@@ -161,17 +195,19 @@ extra nested folder.
 
 | Module | Responsibility | Depends on |
 |---|---|---|
-| `app/models/schemas.py` | Define `Article`, `GeneRecord`, `LLMResponse`, `ToolCall` and their field contracts | nothing (stdlib only) |
+| `app/models/schemas.py` | Define `Article`, `GeneRecord`, `LLMResponse`, `ToolCall`, `GeneInfo`, `ReactomePathway` and their field contracts | nothing (stdlib only) |
 | `app/models/structured.py` | `SearchIntent` — Pydantic schema for LLM-generated (untrusted) data | `pydantic` |
-| `app/config.py` | Optional stdlib `.env` loader shared by the PubMed tool and GLM client | nothing (stdlib only) |
+| `app/config.py` | Optional stdlib `.env` loader shared by all NCBI/GLM tools | nothing (stdlib only) |
 | `app/llm/base.py` | Provider-neutral `LLMClient` protocol (`json_mode`, `tools`, `tool_choice`), `LLMError` taxonomy, message-contract v2 validation | `schemas.py` |
 | `app/llm/glm.py` | `GLMClient`: SDK wiring, model/temperature/json_mode resolution, neutral↔provider message & tool-call conversion, secret redaction | `base.py`, `config.py`, `schemas.py`, `zhipuai` |
 | `app/llm/structured.py` | `chat_structured` (JSON parse → Pydantic validate) and `extract_search_intent`; `StructuredOutputError` | `base.py`, `structured.py` (models), `prompts` |
-| `app/prompts/*.py` | Versioned system prompts (extraction; literature agent) | nothing |
+| `app/prompts/*.py` | Versioned system prompts (extraction; multi-tool agent) | nothing |
 | `app/agent/errors.py` | `AgentError` / `ToolExecutionError` / `AgentLoopError` | nothing |
-| `app/agent/tools.py` | `PubMedSearchArgs`, tool definition (schema from the model), allowlist `TOOL_REGISTRY`, execution + bounded serialization | `errors.py`, `schemas.py`, `pubmed.py`, `pydantic` |
-| `app/agent/loop.py` | `run_literature_agent` bounded loop + `AgentResult` | `errors.py`, `tools.py`, `base.py`, `prompts` |
+| `app/agent/tools.py` | Args models (`PubMedSearchArgs`/`GeneInfoArgs`/`ReactomePathwayArgs`), tool definitions (schemas from the models), 3-entry allowlist `TOOL_REGISTRY` + `TOOL_DEFINITIONS`, execution + bounded, source-tagged serialization | `errors.py`, `schemas.py`, `pubmed.py`, `ncbi_gene.py`, `reactome.py`, `pydantic` |
+| `app/agent/loop.py` | `run_literature_agent` bounded loop + `AgentResult` (registry-driven catalogue, per-source provenance) | `errors.py`, `tools.py`, `base.py`, `prompts` |
 | `app/tools/pubmed.py` | Query validation, NCBI identity, HTTP with timeout/retry, ESearch/EFetch calls, XML→`Article` parsing | `schemas.py`, `config.py`, `requests` |
+| `app/tools/ncbi_gene.py` | NCBI Gene lookup: ESearch(db=gene) exact-symbol+organism search, ESummary parse, deterministic resolution, `NCBIGeneError` | `schemas.py`, `config.py`, `requests` |
+| `app/tools/reactome.py` | Reactome mapping via Analysis Service: deterministic order/dedup/slice, `ReactomeError` | `schemas.py`, `requests` |
 | `app/parsers/gene_file_parser.py` | File-type dispatch, column alias mapping, gene cleaning, numeric validation, duplicate policy, parse statistics | `schemas.py`, `pandas`, `openpyxl` (via pandas) |
 | `main.py` | argparse subcommands (`pubmed`, `parse`, `llm`, `structured`, `agent`), summaries, JSON persistence, error→exit-code mapping | the modules above |
 | `tests/` | Offline tests with fakes (SDK/HTTP/LLM monkeypatched, files in `tmp_path`) + opt-in network tests | everything above |
@@ -205,13 +241,25 @@ providers and tools evolve independently.
 - **Allowlist registry = security boundary.** The model can reach exactly
   the functions in `TOOL_REGISTRY`; unknown names fail loudly. No `eval`,
   no `globals()`, no dynamic imports.
-- **Bounded loop, bounded tool results.** `MAX_AGENT_STEPS=4` (no
+- **Bounded loop, bounded tool results.** `MAX_AGENT_STEPS=6` (no
   `while True`); tool answers are projections (≤5 articles, abstracts
   truncated at 1500 chars **with an explicit marker**) so multi-step
   conversations stay affordable and nothing is cut silently.
 - **Fail fast in the agent (Phase 4 policy).** Malformed tool arguments,
   unknown tools and PubMed errors abort the run with distinguishable
   exceptions instead of being retried or "repaired" — observable first.
+- **One agent, one loop, one registry (Phase 5).** New tools join via
+  `TOOL_REGISTRY` + `TOOL_DEFINITIONS` only; the loop stayed tool-agnostic
+  (no per-tool if/elif). Tool results carry a `"source"` provenance tag,
+  and `AgentResult` records per-source identifiers (PMIDs / GeneIDs /
+  Reactome IDs) collected from real tool outputs.
+- **Evidence semantics are part of the contract (Phase 5).** NCBI Gene /
+  Reactome are curated database facts; PubMed is literature evidence. Tool
+  descriptions and the system prompt forbid conflating them, and Reactome
+  mappings are participation, never causal regulation.
+- **No enrichment (Phase 5 boundary).** The Reactome tool answers
+  single-gene pathway context for the agent; gene-list enrichment
+  statistics, DEG ranking and prioritization are out of scope.
 - **Extraction, not interpretation.** The `SearchIntent` prompt forbids
   inferring biology the user did not state; the schema rejects extra fields
   (`extra="forbid"`) so violations are loud, not silently dropped.
