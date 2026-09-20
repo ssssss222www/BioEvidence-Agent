@@ -24,8 +24,10 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.agent.errors import ToolExecutionError
-from app.models.schemas import Article, ToolCall
+from app.models.schemas import Article, GeneInfo, ReactomePathway, ToolCall
+from app.tools.ncbi_gene import NCBIGeneError, get_gene_info
 from app.tools.pubmed import PubMedError, search_pubmed
+from app.tools.reactome import ReactomeError, get_reactome_pathways
 
 #: Agent policy: at most this many articles are returned to the model.
 #: The underlying search_pubmed() stays general (up to 200) — the cap
@@ -37,6 +39,10 @@ MAX_ARTICLES_TO_MODEL = 5
 #: small enough for multi-step conversations while preserving the fact
 #: that content was cut.
 MAX_ABSTRACT_CHARS = 1500
+
+#: NCBI Gene summaries longer than this are truncated with the same
+#: explicit-marker policy as abstracts.
+MAX_SUMMARY_CHARS = 1200
 
 _ARGUMENTS_PREVIEW_CHARS = 120
 
@@ -62,22 +68,104 @@ class PubMedSearchArgs(BaseModel):
         return query
 
 
-#: OpenAI-style tool definition shown to the model. The JSON-schema part is
-#: derived from PubMedSearchArgs so there is exactly one source of truth
-#: (Pydantic v2 emits ``additionalProperties: false`` for
+class GeneInfoArgs(BaseModel):
+    """Validated arguments for the ``get_gene_info`` tool.
+
+    ``species`` is required — the agent passes the user's explicit species
+    context; no silent cross-species default.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    gene: str
+    species: str
+
+    @field_validator("gene", "species")
+    @classmethod
+    def _clean_non_empty(cls, value: str, info) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError(f"{info.field_name} must be non-empty after stripping")
+        return text
+
+
+class ReactomePathwayArgs(BaseModel):
+    """Validated arguments for the ``get_reactome_pathways`` tool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    gene: str
+    species: str
+    max_results: int = Field(default=5, ge=1, le=10)
+
+    @field_validator("gene", "species")
+    @classmethod
+    def _clean_non_empty(cls, value: str, info) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError(f"{info.field_name} must be non-empty after stripping")
+        return text
+
+
+#: OpenAI-style tool definitions shown to the model. Each JSON-schema part
+#: is derived from the matching Pydantic args model so there is exactly one
+#: source of truth (Pydantic v2 emits ``additionalProperties: false`` for
 #: ``extra="forbid"`` models).
-PUBMED_TOOL_DEFINITION: dict = {
+SEARCH_PUBMED_TOOL: dict = {
     "type": "function",
     "function": {
         "name": "search_pubmed",
         "description": (
-            "Search PubMed for biomedical literature. Use this whenever "
-            "literature evidence is needed. 'query' is a PubMed query "
-            "string, e.g. \"TP53 AND breast cancer\". 'max_results' is the "
-            "number of articles to return (1-5, default 5)."
+            "Search PubMed for biomedical literature. Use this for published "
+            "evidence: disease associations, mechanisms, experimental "
+            "findings, or any claim that needs literature support. 'query' "
+            "is a PubMed query string, e.g. \"TP53 AND breast cancer\". "
+            "'max_results' is the number of articles to return (1-5, "
+            "default 5)."
         ),
         "parameters": PubMedSearchArgs.model_json_schema(),
     },
+}
+
+GET_GENE_INFO_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "get_gene_info",
+        "description": (
+            "Get curated NCBI Gene database facts for one gene: official "
+            "symbol, GeneID, full name, organism, chromosome, map location, "
+            "aliases, and the NCBI summary. Use for gene identity and "
+            "annotation questions, not for published evidence. 'species' "
+            "must state the organism (e.g. 'human' or 'Homo sapiens'); do "
+            "not assume a species the user did not state."
+        ),
+        "parameters": GeneInfoArgs.model_json_schema(),
+    },
+}
+
+GET_REACTOME_PATHWAYS_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "get_reactome_pathways",
+        "description": (
+            "Get the Reactome pathways a gene maps to (participates in / is "
+            "associated with) in the curated Reactome model. Returns pathway "
+            "stable IDs (R-…), names, species, and disease flags. Mapping "
+            "means participation, NOT causal regulation. 'species' must "
+            "state the organism. 'max_results' limits pathways returned "
+            "(1-10, default 5)."
+        ),
+        "parameters": ReactomePathwayArgs.model_json_schema(),
+    },
+}
+
+#: Tool definitions keyed by registry name. The agent loop derives the
+#: catalogue from TOOL_REGISTRY keys, so registry and definitions can never
+#: drift apart.
+TOOL_DEFINITIONS: dict[str, dict] = {
+    "search_pubmed": SEARCH_PUBMED_TOOL,
+    "get_gene_info": GET_GENE_INFO_TOOL,
+    "get_reactome_pathways": GET_REACTOME_PATHWAYS_TOOL,
 }
 
 
@@ -86,17 +174,20 @@ class ToolResult:
     """Outcome of one executed tool call.
 
     ``output`` is the JSON string placed verbatim into the role="tool"
-    message; ``pmids`` are the article PMIDs the agent actually saw, used
-    to build the trustworthy ``AgentResult.used_pmids`` list (never
-    re-extracted from model text).
+    message (its top level always carries a ``"source"`` provenance tag).
+    The id lists collect what the agent actually saw — PMIDs, NCBI
+    GeneIDs, Reactome stable IDs — and feed the trustworthy
+    ``AgentResult.used_*`` lists (never re-extracted from model text).
     """
 
     output: str
     pmids: list[str] = field(default_factory=list)
+    gene_ids: list[str] = field(default_factory=list)
+    reactome_ids: list[str] = field(default_factory=list)
 
 
-def execute_pubmed_search(tool_call: ToolCall) -> ToolResult:
-    """Validate arguments, run the PubMed tool, serialize the result."""
+def _parse_tool_arguments(tool_call: ToolCall, args_model: type[BaseModel]):
+    """Shared argument pipeline: raw JSON string → validated model."""
     try:
         raw_arguments = json.loads(tool_call.arguments)
     except json.JSONDecodeError as exc:
@@ -106,12 +197,17 @@ def execute_pubmed_search(tool_call: ToolCall) -> ToolResult:
             f"{tool_call.arguments[:_ARGUMENTS_PREVIEW_CHARS]!r}"
         ) from exc
     try:
-        args = PubMedSearchArgs.model_validate(raw_arguments)
+        return args_model.model_validate(raw_arguments)
     except ValidationError as exc:
         raise ToolExecutionError(
             f"schema validation failed for '{tool_call.name}' arguments: "
             f"{_format_validation_error(exc)}"
         ) from exc
+
+
+def execute_pubmed_search(tool_call: ToolCall) -> ToolResult:
+    """Validate arguments, run the PubMed tool, serialize the result."""
+    args = _parse_tool_arguments(tool_call, PubMedSearchArgs)
     try:
         articles = search_pubmed(args.query, args.max_results)
     except (PubMedError, ValueError) as exc:
@@ -119,6 +215,7 @@ def execute_pubmed_search(tool_call: ToolCall) -> ToolResult:
             f"PubMed execution failed for '{tool_call.name}': {exc}"
         ) from exc
     payload = {
+        "source": "PubMed",
         "query": args.query,
         "retrieved_count": len(articles),
         "articles": [
@@ -132,9 +229,68 @@ def execute_pubmed_search(tool_call: ToolCall) -> ToolResult:
     )
 
 
+def execute_get_gene_info(tool_call: ToolCall) -> ToolResult:
+    """Validate arguments, run the NCBI Gene tool, serialize the result."""
+    args = _parse_tool_arguments(tool_call, GeneInfoArgs)
+    try:
+        info = get_gene_info(args.gene, args.species)
+    except (NCBIGeneError, ValueError) as exc:
+        raise ToolExecutionError(
+            f"NCBI Gene execution failed for '{tool_call.name}': {exc}"
+        ) from exc
+    payload = {
+        "source": "NCBI Gene",
+        "query": {"gene": args.gene, "species": args.species},
+        "gene": _gene_payload(info),
+    }
+    return ToolResult(
+        output=json.dumps(payload, ensure_ascii=False),
+        gene_ids=[info.gene_id],
+    )
+
+
+def execute_get_reactome_pathways(tool_call: ToolCall) -> ToolResult:
+    """Validate arguments, run the Reactome tool, serialize the result."""
+    args = _parse_tool_arguments(tool_call, ReactomePathwayArgs)
+    try:
+        pathways = get_reactome_pathways(
+            args.gene, args.species, max_results=args.max_results
+        )
+    except (ReactomeError, ValueError) as exc:
+        raise ToolExecutionError(
+            f"Reactome execution failed for '{tool_call.name}': {exc}"
+        ) from exc
+    payload = {
+        "source": "Reactome",
+        "query": {
+            "gene": args.gene,
+            "species": args.species,
+            "max_results": args.max_results,
+        },
+        "pathways": [
+            {
+                "stable_id": pathway.stable_id,
+                "name": pathway.name,
+                "species": pathway.species,
+                "is_disease": pathway.is_disease,
+                "is_inferred": pathway.is_inferred,
+                "url": pathway.url,
+            }
+            for pathway in pathways
+        ],
+        "retrieved_count": len(pathways),
+    }
+    return ToolResult(
+        output=json.dumps(payload, ensure_ascii=False),
+        reactome_ids=[pathway.stable_id for pathway in pathways],
+    )
+
+
 #: Allowlist registry — the only functions an LLM tool call can ever reach.
 TOOL_REGISTRY: dict[str, Callable[[ToolCall], ToolResult]] = {
     "search_pubmed": execute_pubmed_search,
+    "get_gene_info": execute_get_gene_info,
+    "get_reactome_pathways": execute_get_reactome_pathways,
 }
 
 
@@ -173,6 +329,28 @@ def _article_payload(article: Article) -> dict:
         "abstract": abstract,
         "journal": article.journal,
         "publication_year": article.publication_year,
+    }
+
+
+def _gene_payload(info: GeneInfo) -> dict:
+    """Model-facing projection of a GeneInfo (with bounded summary)."""
+    summary = info.summary
+    if summary and len(summary) > MAX_SUMMARY_CHARS:
+        summary = (
+            summary[:MAX_SUMMARY_CHARS]
+            + f"\n[summary truncated to {MAX_SUMMARY_CHARS} characters]"
+        )
+    return {
+        "gene_id": info.gene_id,
+        "symbol": info.symbol,
+        "name": info.name,
+        "organism": info.organism,
+        "tax_id": info.tax_id,
+        "chromosome": info.chromosome,
+        "map_location": info.map_location,
+        "aliases": info.aliases,
+        "summary": summary,
+        "ncbi_url": info.ncbi_url,
     }
 
 

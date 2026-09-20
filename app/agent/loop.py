@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 from app.agent.errors import AgentLoopError
 from app.agent.tools import (
-    PUBMED_TOOL_DEFINITION,
+    TOOL_DEFINITIONS,
     TOOL_REGISTRY,
     execute_tool_call,
 )
@@ -25,25 +25,30 @@ from app.llm.base import LLMClient
 from app.models.schemas import ToolCall
 from app.prompts.literature_agent import LITERATURE_AGENT_SYSTEM_PROMPT
 
-#: Hard cap on LLM requests per run. A literature question needs at most a
-#: couple of searches plus a final answer; 4 leaves headroom while keeping
-#: worst-case cost/latency bounded.
-MAX_AGENT_STEPS = 4
+#: Hard cap on LLM requests per run. Since Phase 5 the agent composes up to
+#: three tools (NCBI Gene + Reactome + PubMed) sequentially, and a real
+#: run already used 3 tool calls / 4 steps; 6 leaves room for final
+#: synthesis plus a little extra retrieval while keeping worst-case
+#: cost/latency bounded.
+MAX_AGENT_STEPS = 6
 
 
 @dataclass
 class AgentResult:
     """Final outcome of one agent run.
 
-    ``used_pmids`` comes from the executed tool results themselves — never
-    re-extracted from the model's answer text, so it is the trustworthy
-    record of which evidence the agent actually saw.
+    ``used_pmids`` / ``used_gene_ids`` / ``used_reactome_ids`` come from
+    the executed tool results themselves — never re-extracted from the
+    model's answer text, so they are the trustworthy provenance record of
+    which identifiers the agent actually saw.
     """
 
     answer: str
     steps: int
     tool_call_count: int
     used_pmids: list[str] = field(default_factory=list)
+    used_gene_ids: list[str] = field(default_factory=list)
+    used_reactome_ids: list[str] = field(default_factory=list)
     model: str | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
@@ -74,11 +79,13 @@ def run_literature_agent(
         {"role": "user", "content": prompt},
     ]
     tool_definitions = [
-        _definition_for(name) for name in TOOL_REGISTRY
+        TOOL_DEFINITIONS[name] for name in TOOL_REGISTRY
     ]
 
     tool_call_count = 0
     used_pmids: list[str] = []
+    used_gene_ids: list[str] = []
+    used_reactome_ids: list[str] = []
     usage_total = {"prompt": 0, "completion": 0, "total": 0}
     usage_seen = False
     resolved_model: str | None = None
@@ -108,9 +115,14 @@ def run_literature_agent(
             for tool_call in response.tool_calls:
                 result = execute_tool_call(tool_call)  # fail fast on errors
                 tool_call_count += 1
-                for pmid in result.pmids:
-                    if pmid not in used_pmids:
-                        used_pmids.append(pmid)
+                for result_attr, collected in (
+                    ("pmids", used_pmids),
+                    ("gene_ids", used_gene_ids),
+                    ("reactome_ids", used_reactome_ids),
+                ):
+                    for identifier in getattr(result, result_attr):
+                        if identifier not in collected:
+                            collected.append(identifier)
                 messages.append(
                     {
                         "role": "tool",
@@ -126,6 +138,8 @@ def run_literature_agent(
                 steps=step,
                 tool_call_count=tool_call_count,
                 used_pmids=used_pmids,
+                used_gene_ids=used_gene_ids,
+                used_reactome_ids=used_reactome_ids,
                 model=resolved_model,
                 prompt_tokens=usage_total["prompt"] if usage_seen else None,
                 completion_tokens=(
@@ -158,10 +172,3 @@ def _assistant_tool_call_message(
             for call in tool_calls
         ],
     }
-
-
-def _definition_for(name: str) -> dict:
-    """Tool definition for a registered executor (Phase 4: one tool)."""
-    if name != "search_pubmed":  # pragma: no cover - registry has one entry
-        raise AgentLoopError(f"no tool definition available for '{name}'")
-    return PUBMED_TOOL_DEFINITION
