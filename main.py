@@ -56,12 +56,14 @@ def build_parser() -> argparse.ArgumentParser:
         prog="literature-agent",
         description="Gene-list-driven biomedical literature research agent "
         "(Phase 0: PubMed retrieval, Phase 1: gene file parser, "
-        "Phase 2: GLM chat, Phase 3: structured output extraction).",
+        "Phase 2: GLM chat, Phase 3: structured output extraction, "
+        "Phase 4: agent loop with PubMed tool).",
         epilog='Examples:\n'
         '  python main.py pubmed --query "TP53 AND breast cancer" --max-results 5\n'
         "  python main.py parse --input examples/example_deg.csv\n"
         "  python main.py llm --prompt \"Explain the main biological function of TP53 in one sentence.\"\n"
-        "  python main.py structured --prompt \"I want to investigate TP53 in breast cancer, focusing on DNA damage and apoptosis.\"",
+        "  python main.py structured --prompt \"I want to investigate TP53 in breast cancer, focusing on DNA damage and apoptosis.\"\n"
+        "  python main.py agent --prompt \"Find PubMed evidence about TP53 in breast cancer.\"",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subcommands = parser.add_subparsers(dest="command", required=True, metavar="command")
@@ -160,6 +162,27 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_INTENT_OUTPUT,
         help=f"Path of the JSON output file (default: {DEFAULT_INTENT_OUTPUT})",
+    )
+
+    agent_parser = subcommands.add_parser(
+        "agent",
+        help="Run the bounded literature-agent loop (GLM + PubMed tool, Phase 4)",
+    )
+    agent_parser.add_argument(
+        "--prompt",
+        required=True,
+        help='Research question, e.g. "Find PubMed evidence about TP53 in breast cancer."',
+    )
+    agent_parser.add_argument(
+        "--model",
+        default=None,
+        help="GLM model name (default: GLM_MODEL from environment/.env)",
+    )
+    agent_parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Sampling temperature in [0, 1] (default: API-side default)",
     )
     return parser
 
@@ -401,6 +424,55 @@ def run_structured(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# agent subcommand
+# ---------------------------------------------------------------------------
+
+def run_agent(args: argparse.Namespace) -> int:
+    # Lazy imports keep pubmed/parse working without the zhipuai SDK.
+    from app.agent.errors import AgentLoopError, ToolExecutionError
+    from app.agent.loop import MAX_AGENT_STEPS, run_literature_agent
+    from app.llm.base import LLMConfigurationError, LLMError
+    from app.llm.glm import GLMClient
+
+    try:
+        client = GLMClient(model=args.model)
+        result = run_literature_agent(
+            client, args.prompt, temperature=args.temperature
+        )
+    except ValueError as exc:
+        print(f"[invalid input] {exc}", file=sys.stderr)
+        return EXIT_BAD_INPUT
+    except ToolExecutionError as exc:
+        print(f"[tool error] {exc}", file=sys.stderr)
+        return EXIT_TOOL_FAILED
+    except AgentLoopError as exc:
+        print(f"[agent error] {exc}", file=sys.stderr)
+        return EXIT_TOOL_FAILED
+    except LLMConfigurationError as exc:
+        print(f"[llm config error] {exc}", file=sys.stderr)
+        return EXIT_TOOL_FAILED
+    except LLMError as exc:
+        print(f"[llm error] {exc}", file=sys.stderr)
+        return EXIT_TOOL_FAILED
+
+    print("Provider: GLM")
+    print(f"Model: {result.model}")
+    print(f"Steps: {result.steps} (max {MAX_AGENT_STEPS})")
+    print(f"Tool calls: {result.tool_call_count}")
+    pmids = ", ".join(result.used_pmids) if result.used_pmids else "(none)"
+    print(f"Retrieved PMIDs: {pmids}")
+    if result.total_tokens is not None:
+        print(
+            f"Usage: prompt tokens={result.prompt_tokens} | "
+            f"completion tokens={result.completion_tokens} | "
+            f"total tokens={result.total_tokens}"
+        )
+    print("Answer:")
+    print(result.answer)
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
 
@@ -441,6 +513,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_llm(args)
     if args.command == "structured":
         return run_structured(args)
+    if args.command == "agent":
+        return run_agent(args)
     raise AssertionError(f"unhandled command: {args.command}")  # pragma: no cover
 
 
