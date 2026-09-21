@@ -1,8 +1,10 @@
-# Literature Agent
+# BioEvidence Agent
 
 ## Project
 
-Literature Agent — gene-list-driven biomedical literature research agent.
+BioEvidence Agent — a multi-source biomedical evidence agent for gene
+annotation, pathway mapping, literature retrieval, and provenance-aware
+synthesis.
 
 ## Goal
 

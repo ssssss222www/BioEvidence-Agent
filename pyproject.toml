@@ -1,5 +1,5 @@
 [project]
-name = "literature-agent"
+name = "bioevidence-agent"
 version = "0.1.0"
 description = "Gene-list-driven biomedical literature research agent (Phase 0: PubMed retrieval)"
 readme = "README.md"

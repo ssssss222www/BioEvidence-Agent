@@ -1,4 +1,4 @@
-"""Data models for Literature Agent.
+"""Data models for BioEvidence Agent.
 
 Core records shared across phases:
 
