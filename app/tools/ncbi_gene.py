@@ -54,7 +54,7 @@ from app.models.schemas import GeneInfo
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 ESUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 
-APP_NAME = "literature-agent"
+APP_NAME = "bioevidence-agent"
 APP_VERSION = "0.1.0"
 
 REQUEST_TIMEOUT_SECONDS = 30

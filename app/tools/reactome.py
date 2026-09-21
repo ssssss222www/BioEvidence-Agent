@@ -34,7 +34,7 @@ from app.models.schemas import ReactomePathway
 
 ANALYSIS_URL = "https://reactome.org/AnalysisService/identifiers/"
 
-APP_NAME = "literature-agent"
+APP_NAME = "bioevidence-agent"
 APP_VERSION = "0.1.0"
 
 REQUEST_TIMEOUT_SECONDS = 60  # analysis of a large pathway DB can be slow

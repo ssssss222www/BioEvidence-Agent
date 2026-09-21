@@ -1,10 +1,14 @@
-"""Literature Agent CLI — orchestration only.
+"""BioEvidence Agent CLI — orchestration only.
 
 Phase 0 (``pubmed``): PubMed query -> ESearch -> PMIDs -> EFetch -> Article
 -> JSON. Phase 1 (``parse``): gene/DEG file -> column mapping -> cleaning
 -> GeneRecord -> JSON. Phase 2 (``llm``): prompt -> GLMClient -> LLMResponse
 printed to the terminal. Phase 3 (``structured``): free text -> GLMClient ->
-JSON -> Pydantic validation -> SearchIntent saved as JSON.
+JSON -> Pydantic validation -> SearchIntent saved as JSON. Phase 4
+(``agent``): bounded agent loop (GLM + PubMed tool). Phase 5: the same one
+agent/one loop drives three tools — search_pubmed + get_gene_info (NCBI
+Gene) + get_reactome_pathways (Reactome) — with per-source provenance
+(PMIDs / GeneIDs / Reactome stable IDs).
 
 This module wires together argument parsing, the PubMed tool, the gene-file
 parser, the GLM client, terminal summary printing and JSON persistence. All
@@ -53,17 +57,18 @@ EXIT_BAD_INPUT = 2
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="literature-agent",
-        description="Gene-list-driven biomedical literature research agent "
+        prog="bioevidence-agent",
+        description="Multi-source biomedical evidence agent "
         "(Phase 0: PubMed retrieval, Phase 1: gene file parser, "
-        "Phase 2: GLM chat, Phase 3: structured output extraction, "
-        "Phase 4: agent loop with PubMed tool).",
+        "Phase 2: GLM client, Phase 3: structured output, "
+        "Phase 4: bounded agent loop, Phase 5: NCBI Gene + Reactome + "
+        "PubMed multi-tool agent).",
         epilog='Examples:\n'
         '  python main.py pubmed --query "TP53 AND breast cancer" --max-results 5\n'
         "  python main.py parse --input examples/example_deg.csv\n"
         "  python main.py llm --prompt \"Explain the main biological function of TP53 in one sentence.\"\n"
         "  python main.py structured --prompt \"I want to investigate TP53 in breast cancer, focusing on DNA damage and apoptosis.\"\n"
-        "  python main.py agent --prompt \"Find PubMed evidence about TP53 in breast cancer.\"",
+        "  python main.py agent --prompt \"Explain human TP53, its Reactome pathways, and PubMed evidence in breast cancer.\"",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subcommands = parser.add_subparsers(dest="command", required=True, metavar="command")
@@ -166,7 +171,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     agent_parser = subcommands.add_parser(
         "agent",
-        help="Run the bounded literature-agent loop (GLM + PubMed tool, Phase 4)",
+        help="Run the bounded multi-tool biomedical agent "
+        "(NCBI Gene + Reactome + PubMed, Phase 5)",
     )
     agent_parser.add_argument(
         "--prompt",

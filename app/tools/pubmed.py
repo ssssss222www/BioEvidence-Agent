@@ -33,7 +33,7 @@ from app.models.schemas import Article
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
-APP_NAME = "literature-agent"
+APP_NAME = "bioevidence-agent"
 APP_VERSION = "0.1.0"
 
 REQUEST_TIMEOUT_SECONDS = 30
@@ -376,7 +376,7 @@ def _extract_doi(element: ET.Element) -> str | None:
 def search_pubmed(query: str, max_results: int = 10) -> list[Article]:
     """Query PubMed and return up to ``max_results`` parsed articles.
 
-    This is the function a future Literature Agent will register as its
+    This is the function the agent layer registers as its
     "search literature" tool: one call, structured output, no leaks of HTTP
     details. It simply composes :func:`search_pmids` and :func:`fetch_articles`.
     """
